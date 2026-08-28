@@ -1,4 +1,13 @@
 import { useMemo, useState } from "react";
+import {
+  FolderOpen,
+  Pencil,
+  Plus,
+  Server,
+  Terminal,
+  Trash2,
+  X,
+} from "lucide-react";
 import TerminalView from "./components/TerminalView";
 import ServerForm from "./components/ServerForm";
 import FileBrowser from "./components/FileBrowser";
@@ -19,6 +28,11 @@ interface TermTab {
 
 type SidebarTab = "servers" | "files";
 
+type SessionStatus = "connected" | "failed";
+
+const DEFAULT_SIDEBAR_WIDTH = 272;
+const SIDEBAR_STORAGE_KEY = "sidebarWidth";
+
 export default function App() {
   const [servers, setServers] = useState<ServerProfile[]>(loadServers);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("servers");
@@ -26,6 +40,13 @@ export default function App() {
   const [editing, setEditing] = useState<ServerProfile | null>(null);
   const [tabs, setTabs] = useState<TermTab[]>([]);
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [sessionStatus, setSessionStatus] = useState<
+    Record<string, SessionStatus>
+  >({});
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    const saved = parseInt(localStorage.getItem(SIDEBAR_STORAGE_KEY) ?? "", 10);
+    return Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_SIDEBAR_WIDTH;
+  });
 
   // 文件面板跟随当前活跃终端的会话
   const activeSessionId = activeKey;
@@ -60,6 +81,11 @@ export default function App() {
   };
 
   const closeTerminal = (key: string) => {
+    setSessionStatus((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
     setTabs((prev) => {
       const next = prev.filter((t) => t.key !== key);
       if (activeKey === key) {
@@ -70,7 +96,35 @@ export default function App() {
   };
 
   const activeTab = tabs.find((t) => t.key === activeKey) ?? null;
-  void activeTab;
+  const activeServerId = activeTab?.serverId ?? null;
+
+  const startSidebarResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    let width = sidebarWidth;
+    document.body.classList.add("resizing");
+    const onMove = (ev: MouseEvent) => {
+      width = Math.min(
+        Math.max(startX + (ev.clientX - startX), 224),
+        window.innerWidth - 320
+      );
+      setSidebarWidth(width);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("resizing");
+      localStorage.setItem(SIDEBAR_STORAGE_KEY, String(width));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const resetSidebarWidth = () => {
+    setSidebarWidth(DEFAULT_SIDEBAR_WIDTH);
+    localStorage.setItem(SIDEBAR_STORAGE_KEY, String(DEFAULT_SIDEBAR_WIDTH));
+  };
+
   const terminalViews = useMemo(
     () =>
       tabs.map((t) => (
@@ -79,7 +133,13 @@ export default function App() {
           className="terminal-pane"
           style={{ display: t.key === activeKey ? "block" : "none" }}
         >
-          <TerminalView sessionKey={t.key} params={t.params} />
+          <TerminalView
+            sessionKey={t.key}
+            params={t.params}
+            onStatus={(status) =>
+              setSessionStatus((prev) => ({ ...prev, [t.key]: status }))
+            }
+          />
         </div>
       )),
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -95,71 +155,95 @@ export default function App() {
           title="服务器"
           onClick={() => setSidebarTab("servers")}
         >
-          🖥️
+          <Server size={19} strokeWidth={1.8} />
         </button>
         <button
           className={`act-btn ${sidebarTab === "files" ? "active" : ""}`}
           title="文件"
           onClick={() => setSidebarTab("files")}
         >
-          📂
+          <FolderOpen size={19} strokeWidth={1.8} />
         </button>
       </nav>
 
       {/* 内容侧栏 */}
-      <aside className="sidebar">
+      <aside className="sidebar" style={{ width: sidebarWidth }}>
         {sidebarTab === "servers" ? (
           <div className="panel">
             <div className="panel-header">
               <span>服务器</span>
               <button
+                className="icon-btn"
                 title="新建服务器"
                 onClick={() => {
                   setEditing(null);
                   setFormOpen(true);
                 }}
               >
-                ＋
+                <Plus size={15} strokeWidth={2} />
               </button>
             </div>
             <ul className="server-list">
-              {servers.map((s) => (
-                <li key={s.id} onClick={() => openTerminal(s)}>
-                  <div className="server-item-main">
-                    <span className="server-name">{s.name}</span>
-                    <span className="server-host">
-                      {s.username}@{s.host}
+              {servers.map((s) => {
+                const tab = tabs.find((t) => t.serverId === s.id);
+                const status = tab ? sessionStatus[tab.key] : undefined;
+                const cls = [
+                  tab && status === undefined ? "connecting" : "",
+                  status === "connected" ? "open" : "",
+                  status === "failed" ? "failed" : "",
+                  activeServerId === s.id ? "active" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ");
+                return (
+                  <li
+                    key={s.id}
+                    className={cls}
+                    onClick={() => openTerminal(s)}
+                  >
+                    <div className="server-item-main">
+                      <span className="server-name">
+                        <span className="server-dot" />
+                        {s.name}
+                      </span>
+                      <span className="server-host">
+                        {s.username}@{s.host}
+                      </span>
+                    </div>
+                    <span className="server-actions">
+                      <button
+                        className="icon-btn"
+                        title="编辑"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditing(s);
+                          setFormOpen(true);
+                        }}
+                      >
+                        <Pencil size={13} strokeWidth={1.8} />
+                      </button>
+                      <button
+                        className="icon-btn danger"
+                        title="删除"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm(`删除服务器「${s.name}」？`)) {
+                            persist(servers.filter((x) => x.id !== s.id));
+                          }
+                        }}
+                      >
+                        <Trash2 size={13} strokeWidth={1.8} />
+                      </button>
                     </span>
-                  </div>
-                  <span className="server-actions">
-                    <button
-                      className="icon-btn"
-                      title="编辑"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setEditing(s);
-                        setFormOpen(true);
-                      }}
-                    >
-                      ✎
-                    </button>
-                    <button
-                      className="icon-btn danger"
-                      title="删除"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (confirm(`删除服务器「${s.name}」？`)) {
-                          persist(servers.filter((x) => x.id !== s.id));
-                        }
-                      }}
-                    >
-                      ✕
-                    </button>
-                  </span>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
               {servers.length === 0 && (
-                <li className="empty-hint">点击 ＋ 添加你的第一台服务器</li>
+                <li className="empty-state">
+                  <Server size={26} strokeWidth={1.5} />
+                  <p>还没有服务器</p>
+                  <span>点击右上角 + 添加第一台服务器</span>
+                </li>
               )}
             </ul>
           </div>
@@ -167,6 +251,14 @@ export default function App() {
           <FileBrowser sessionId={activeSessionId} />
         )}
       </aside>
+
+      {/* 侧栏与终端之间的拖拽分隔条 */}
+      <div
+        className="sidebar-resizer"
+        title="拖动调整侧栏宽度（双击恢复默认）"
+        onMouseDown={startSidebarResize}
+        onDoubleClick={resetSidebarWidth}
+      />
 
       {/* 右侧：终端标签页 */}
       <main className="main-area">
@@ -180,12 +272,13 @@ export default function App() {
               <span>{t.title}</span>
               <span
                 className="tab-close"
+                title="关闭标签页"
                 onClick={(e) => {
                   e.stopPropagation();
                   closeTerminal(t.key);
                 }}
               >
-                ×
+                <X size={13} strokeWidth={2} />
               </span>
             </div>
           ))}
@@ -193,7 +286,13 @@ export default function App() {
         <div className="terminal-stack">
           {terminalViews}
           {tabs.length === 0 && (
-            <div className="empty-hint welcome">左侧选择服务器即可打开终端</div>
+            <div className="empty-state welcome">
+              <span className="empty-icon">
+                <Terminal size={30} strokeWidth={1.5} />
+              </span>
+              <p>欢迎使用 ShellTool</p>
+              <span>从左侧选择一台服务器即可打开终端</span>
+            </div>
           )}
         </div>
       </main>

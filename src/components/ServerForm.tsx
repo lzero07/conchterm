@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { X } from "lucide-react";
 import type { ServerProfile } from "../storage";
 
 interface Props {
@@ -25,7 +26,12 @@ export default function ServerForm({ initial, onSave, onCancel }: Props) {
   return (
     <div className="modal-backdrop" onClick={onCancel}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>{initial ? "编辑服务器" : "新建服务器"}</h3>
+        <div className="modal-title">
+          <h3>{initial ? "编辑服务器" : "新建服务器"}</h3>
+          <button className="icon-btn" title="关闭" onClick={onCancel}>
+            <X size={15} strokeWidth={1.8} />
+          </button>
+        </div>
         <label>
           名称
           <input

@@ -16,6 +16,8 @@ export interface RemoteFile {
   size: number;
   modifiedMs: number;
   mode: number;
+  owner: string;
+  group: string;
 }
 
 import { invoke, Channel } from "@tauri-apps/api/core";

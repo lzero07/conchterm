@@ -9,6 +9,7 @@ src-tauri/target/
 .vscode/
 .idea/
 *.swp
+docs/
 
 # OS
 Thumbs.db

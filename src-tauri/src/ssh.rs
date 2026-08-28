@@ -1,7 +1,8 @@
 //! SSH 会话管理：连接、认证、PTY、数据流
 //!
 //! 架构说明：
-//! - 每个终端标签页对应一个 Session（一个 russh Client + 一个 channel）
+//! - 每个终端标签页对应一个 Session（一个 russh Client + 一个 shell channel）
+//! - SFTP 使用独立 TCP 连接：部分服务器（MaxSessions 1）拒绝同一连接上多开 session 通道
 //! - 输出数据通过 Tauri ipc::Channel 以二进制推送给前端（xterm.js 直接 write Uint8Array）
 //! - 键盘输入由前端 invoke("ssh_write") 发过来，写入 channel stdin
 
@@ -19,6 +20,7 @@ use tokio::sync::Mutex;
 
 /// 前端传来的连接配置
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectParams {
     pub id: String,
     pub host: String,
@@ -42,12 +44,15 @@ pub struct ConnectResult {
 
 /// 远端文件元数据（SFTP 面板用）
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RemoteFile {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
     pub modified_ms: i64,
     pub mode: u32,
+    pub owner: String,
+    pub group: String,
 }
 
 /// SSH 客户端事件处理器（主机密钥校验在这里回调）
@@ -65,51 +70,22 @@ impl Handler for ClientHandler {
     }
 }
 
-/// 一个已建立的 SSH 会话（对应一个终端 Tab）
-pub struct SshSession {
-    handle: Mutex<client::Handle<ClientHandler>>,
-    /// 终端通道的写半部：键盘输入、窗口 resize 都走这里
-    channel_writer: ChannelWriteHalf<russh::client::Msg>,
-    /// SFTP 通道懒加载缓存
-    sftp: Mutex<Option<Arc<SftpClient>>>,
-}
-
-impl SshSession {
-    pub async fn close_sftp(&self) {
-        *self.sftp.lock().await = None;
-    }
-}
-
-/// 全局会话表：session_id -> 会话实例
-pub struct SessionMap(pub Mutex<HashMap<String, Arc<SshSession>>>);
-
-#[tauri::command]
-pub async fn ssh_connect(
-    params: ConnectParams,
-    on_output: Channel<Vec<u8>>,
-    sessions: State<'_, SessionMap>,
-) -> Result<ConnectResult, String> {
-    let config = client::Config {
+fn ssh_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
         inactivity_timeout: None,
         keepalive_interval: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
-    };
+    })
+}
 
-    let handler = ClientHandler;
-
-    let mut handle = client::connect(
-        Arc::new(config),
-        (params.host.as_str(), params.port),
-        handler,
-    )
-    .await
-    .map_err(|e| format!("连接失败: {e}"))?;
-
-    // ---- 认证 ----
+/// 密码 / 私钥认证（终端与 SFTP 连接共用）
+async fn authenticate(
+    handle: &mut client::Handle<ClientHandler>,
+    params: &ConnectParams,
+) -> Result<(), String> {
     let authed = if let Some(p) = &params.password {
-        let name = params.username.clone();
         handle
-            .authenticate_password(name, p.clone())
+            .authenticate_password(params.username.clone(), p.clone())
             .await
             .map_err(|e| format!("认证失败: {e}"))?
     } else if let Some(key_pem) = &params.private_key {
@@ -125,9 +101,55 @@ pub async fn ssh_connect(
     } else {
         return Err("必须提供密码或私钥".into());
     };
-
     if !authed.success() {
-        return Ok(ConnectResult { ok: false, message: "用户名或密码错误".into() });
+        return Err("用户名或密码错误".into());
+    }
+    Ok(())
+}
+
+/// 一个已建立的 SSH 会话（对应一个终端 Tab）
+pub struct SshSession {
+    handle: Mutex<client::Handle<ClientHandler>>,
+    params: ConnectParams,
+    /// 终端通道的写半部：键盘输入、窗口 resize 都走这里
+    channel_writer: ChannelWriteHalf<russh::client::Msg>,
+    /// SFTP 独立连接（懒加载）
+    sftp: Mutex<Option<Arc<SftpClient>>>,
+}
+
+impl SshSession {
+    pub async fn close_sftp(&self) {
+        if let Some(client) = self.sftp.lock().await.take() {
+            let handle = client.handle.lock().await;
+            let _ = handle
+                .disconnect(Disconnect::ByApplication, "session closed", "")
+                .await;
+        }
+    }
+}
+
+/// 全局会话表：session_id -> 会话实例
+pub struct SessionMap(pub Mutex<HashMap<String, Arc<SshSession>>>);
+
+#[tauri::command]
+pub async fn ssh_connect(
+    params: ConnectParams,
+    on_output: Channel<Vec<u8>>,
+    sessions: State<'_, SessionMap>,
+) -> Result<ConnectResult, String> {
+    let handler = ClientHandler;
+
+    let mut handle = client::connect(
+        ssh_config(),
+        (params.host.as_str(), params.port),
+        handler,
+    )
+    .await
+    .map_err(|e| format!("连接失败: {e}"))?;
+
+    // ---- 认证 ----
+    if let Err(e) = authenticate(&mut handle, &params).await {
+        return Ok(ConnectResult { ok: false, message: e });
     }
 
     // ---- 开启 PTY + shell ----
@@ -179,6 +201,7 @@ pub async fn ssh_connect(
 
     let session = Arc::new(SshSession {
         handle: Mutex::new(handle),
+        params: params.clone(),
         channel_writer,
         sftp: Mutex::new(None),
     });
@@ -256,35 +279,126 @@ pub async fn ssh_disconnect(
 // ==================== SFTP ====================
 
 /// 封装 russh-sftp 的 SftpSession
-pub struct SftpClient {
-    pub inner: Mutex<russh_sftp::client::SftpSession>,
+#[derive(Default)]
+struct IdNames {
+    users: HashMap<u32, String>,
+    groups: HashMap<u32, String>,
 }
 
-impl SftpClient {
-    pub fn new(inner: russh_sftp::client::SftpSession) -> Self {
-        Self { inner: Mutex::new(inner) }
-    }
+pub struct SftpClient {
+    pub inner: Mutex<russh_sftp::client::SftpSession>,
+    handle: Mutex<client::Handle<ClientHandler>>,
+    /// uid/gid -> 名称 映射（首次列目录时从 /etc/passwd、/etc/group 加载）
+    id_names: Mutex<Option<Arc<IdNames>>>,
 }
 
 async fn get_or_init_sftp(
     session: &SshSession,
+    refresh: bool,
 ) -> Result<Arc<SftpClient>, String> {
-    let mut slot = session.sftp.lock().await;
-    if let Some(existing) = slot.as_ref() {
-        return Ok(existing.clone());
+    if !refresh {
+        if let Some(existing) = session.sftp.lock().await.as_ref() {
+            return Ok(existing.clone());
+        }
     }
-    let handle = session.handle.lock().await;
+
+    // 丢弃旧连接（可能已被服务器断开或策略限制）
+    if let Some(old) = session.sftp.lock().await.take() {
+        let handle = old.handle.lock().await;
+        let _ = handle
+            .disconnect(Disconnect::ByApplication, "reconnect", "")
+            .await;
+    }
+
+    let client = Arc::new(connect_sftp(&session.params).await?);
+    *session.sftp.lock().await = Some(client.clone());
+    Ok(client)
+}
+
+/// SFTP 走独立 TCP 连接：与终端互不占用 session 通道配额
+async fn connect_sftp(params: &ConnectParams) -> Result<SftpClient, String> {
+    let mut handle = client::connect(
+        ssh_config(),
+        (params.host.as_str(), params.port),
+        ClientHandler,
+    )
+    .await
+    .map_err(|e| format!("SFTP 连接失败: {e}"))?;
+    authenticate(&mut handle, params).await?;
     let channel = handle
         .channel_open_session()
         .await
         .map_err(|e| format!("打开 SFTP 通道失败: {e}"))?;
-    drop(handle);
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|e| format!("请求 SFTP 子系统失败: {e}"))?;
     let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
         .await
         .map_err(|e| format!("初始化 SFTP 失败: {e}"))?;
-    let client = Arc::new(SftpClient::new(sftp));
-    *slot = Some(client.clone());
-    Ok(client)
+    Ok(SftpClient {
+        inner: Mutex::new(sftp),
+        handle: Mutex::new(handle),
+        id_names: Mutex::new(None),
+    })
+}
+
+/// 通过 SFTP 读取 passwd/group，把数字 id 解析成用户名/组名。
+/// 读取失败（非 Linux 服务器等）返回空映射，回退显示数字。
+async fn load_id_names(sftp: &russh_sftp::client::SftpSession) -> IdNames {
+    let mut map = IdNames::default();
+    if let Ok(bytes) = sftp.read("/etc/passwd").await {
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 4 {
+                if let Ok(uid) = parts[2].parse::<u32>() {
+                    map.users.insert(uid, parts[0].to_string());
+                }
+                if let Ok(gid) = parts[3].parse::<u32>() {
+                    map.groups.entry(gid).or_insert_with(|| parts[0].to_string());
+                }
+            }
+        }
+    }
+    if let Ok(bytes) = sftp.read("/etc/group").await {
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let parts: Vec<&str> = line.split(':').collect();
+            if parts.len() >= 3 {
+                if let Ok(gid) = parts[2].parse::<u32>() {
+                    map.groups.insert(gid, parts[0].to_string());
+                }
+            }
+        }
+    }
+    map
+}
+
+async fn get_id_names(client: &SftpClient) -> Option<Arc<IdNames>> {
+    let mut slot = client.id_names.lock().await;
+    if slot.is_none() {
+        let names = load_id_names(&*client.inner.lock().await).await;
+        *slot = Some(Arc::new(names));
+    }
+    slot.as_ref().cloned()
+}
+
+/// 执行一次 SFTP 操作；失败视为连接失效，自动重建连接重试一次
+async fn sftp_op<T, E, Fut, F>(
+    session: &SshSession,
+    label: &str,
+    op: F,
+) -> Result<T, String>
+where
+    F: Fn(Arc<SftpClient>) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let client = get_or_init_sftp(session, false).await?;
+    if let Ok(result) = op(client.clone()).await {
+        return Ok(result);
+    }
+    let client = get_or_init_sftp(session, true).await?;
+    op(client).await.map_err(|e| format!("{label}失败: {e}"))
 }
 
 #[tauri::command]
@@ -300,12 +414,13 @@ pub async fn sftp_list(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在".to_string())?;
-    let sftp = get_or_init_sftp(&session).await?;
-    let entries = {
-        let inner = sftp.inner.lock().await;
-        inner.read_dir(&path).await
-    }
-    .map_err(|e| format!("读取目录失败: {e}"))?;
+    let path_ref = &path;
+    let entries = sftp_op(&session, "读取目录", |sftp| async move {
+        sftp.inner.lock().await.read_dir(path_ref).await
+    })
+    .await?;
+    let sftp = get_or_init_sftp(&session, false).await?;
+    let names = get_id_names(&sftp).await;
     let mut files = Vec::new();
     for entry in entries {
         let file_name = entry.file_name();
@@ -313,6 +428,34 @@ pub async fn sftp_list(
             continue;
         }
         let metadata = entry.metadata();
+        let owner = metadata
+            .user
+            .clone()
+            .or_else(|| {
+                metadata
+                    .uid
+                    .and_then(|id| names.as_ref().and_then(|n| n.users.get(&id).cloned()))
+            })
+            .unwrap_or_else(|| {
+                metadata
+                    .uid
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            });
+        let group = metadata
+            .group
+            .clone()
+            .or_else(|| {
+                metadata
+                    .gid
+                    .and_then(|id| names.as_ref().and_then(|n| n.groups.get(&id).cloned()))
+            })
+            .unwrap_or_else(|| {
+                metadata
+                    .gid
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            });
         files.push(RemoteFile {
             name: file_name,
             is_dir: metadata.is_dir(),
@@ -326,6 +469,8 @@ pub async fn sftp_list(
                 })
                 .unwrap_or(0),
             mode: metadata.permissions.unwrap_or(0),
+            owner,
+            group,
         });
     }
     files.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
@@ -345,12 +490,11 @@ pub async fn sftp_mkdir(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在".to_string())?;
-    let sftp = get_or_init_sftp(&session).await?;
-    let result = {
-        let inner = sftp.inner.lock().await;
-        inner.create_dir(&path).await
-    };
-    result.map_err(|e| format!("创建目录失败: {e}"))
+    let path_ref = &path;
+    sftp_op(&session, "创建目录", |sftp| async move {
+        sftp.inner.lock().await.create_dir(path_ref).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -367,16 +511,15 @@ pub async fn sftp_remove(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在".to_string())?;
-    let sftp = get_or_init_sftp(&session).await?;
-    let result = {
-        let inner = sftp.inner.lock().await;
+    let path_ref = &path;
+    sftp_op(&session, "删除", |sftp| async move {
         if is_dir {
-            inner.remove_dir(&path).await
+            sftp.inner.lock().await.remove_dir(path_ref).await
         } else {
-            inner.remove_file(&path).await
+            sftp.inner.lock().await.remove_file(path_ref).await
         }
-    };
-    result.map_err(|e| format!("删除失败: {e}"))
+    })
+    .await
 }
 
 #[tauri::command]
@@ -393,10 +536,10 @@ pub async fn sftp_rename(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在".to_string())?;
-    let sftp = get_or_init_sftp(&session).await?;
-    let result = {
-        let inner = sftp.inner.lock().await;
-        inner.rename(&old_path, &new_path).await
-    };
-    result.map_err(|e| format!("重命名失败: {e}"))
+    let old_ref = &old_path;
+    let new_ref = &new_path;
+    sftp_op(&session, "重命名", |sftp| async move {
+        sftp.inner.lock().await.rename(old_ref, new_ref).await
+    })
+    .await
 }
