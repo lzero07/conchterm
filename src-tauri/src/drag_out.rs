@@ -29,9 +29,7 @@ mod windows_impl {
         DROPEFFECT_COPY,
     };
     use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
-    use windows::Win32::UI::Shell::{
-        BHID_DataObject, IShellItem, SHCreateItemFromParsingName,
-    };
+    use windows::Win32::UI::Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName};
 
     #[implement(IDropSource)]
     struct DropSource {
@@ -66,9 +64,8 @@ mod windows_impl {
             let elapsed = self.start.elapsed().as_millis() as u64;
             // 用 GetAsyncKeyState 兜底检测左键：DoDragDrop 传来的 key_state
             // 在跨线程消息场景下可能不更新
-            let lbutton_down =
-                key_state.0 & 0x1 != 0
-                    || unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000 != 0;
+            let lbutton_down = key_state.0 & 0x1 != 0
+                || unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000 != 0;
             if !lbutton_down {
                 if elapsed < STARTUP_GRACE_MS {
                     // 起跑时左键已松开（invoke 延迟）：干净取消，不留畸形状态
@@ -171,12 +168,7 @@ async fn download_remote_entry(
             .open(remote_path)
             .await
             .map_err(|e| format!("打开远端文件失败: {e}"))?;
-        let local_path = local_dir.join(
-            remote_path
-                .rsplit('/')
-                .next()
-                .unwrap_or("download.tmp"),
-        );
+        let local_path = local_dir.join(remote_path.rsplit('/').next().unwrap_or("download.tmp"));
         let mut local = tokio::fs::File::create(&local_path)
             .await
             .map_err(|e| format!("创建临时文件失败: {e}"))?;
@@ -271,10 +263,7 @@ fn sanitize_name(name: &str) -> String {
 /// 留下坏掉的拖拽状态（Explorer 拖拽全局失效）。因此派发到 Tauri 主线程；
 /// 模态循环自身会泵消息，主线程短暂“阻塞”不影响 UI 响应。
 #[tauri::command]
-pub async fn start_file_drag(
-    app: tauri::AppHandle,
-    local_path: String,
-) -> Result<(), String> {
+pub async fn start_file_drag(app: tauri::AppHandle, local_path: String) -> Result<(), String> {
     let path = PathBuf::from(&local_path);
     if !path.exists() {
         return Err("拖拽文件尚未就绪".into());
