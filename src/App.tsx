@@ -290,7 +290,7 @@ export default function App() {
               <span className="empty-icon">
                 <Terminal size={30} strokeWidth={1.5} />
               </span>
-              <p>欢迎使用 ShellTool</p>
+              <p>欢迎使用 ConchTerm</p>
               <span>从左侧选择一台服务器即可打开终端</span>
             </div>
           )}

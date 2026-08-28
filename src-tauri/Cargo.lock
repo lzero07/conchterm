@@ -634,6 +634,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "conchterm"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "dirs",
+ "rand 0.9.5",
+ "russh",
+ "russh-sftp",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4228,24 +4246,6 @@ dependencies = [
  "digest 0.11.3",
  "keccak",
  "sponge-cursor",
-]
-
-[[package]]
-name = "shelltool"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "dirs",
- "rand 0.9.5",
- "russh",
- "russh-sftp",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

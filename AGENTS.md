@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-ShellTool is a Tauri 2 desktop SSH client: React + TypeScript frontend, Rust backend.
+ConchTerm is a Tauri 2 desktop SSH client: React + TypeScript frontend, Rust backend.
 
 - `src/` — frontend source: `App.tsx` (layout and tab state), `components/` (TerminalView, ServerForm, FileBrowser), `api.ts` (Tauri invoke wrappers), `storage.ts` (localStorage persistence).
 - `src-tauri/src/` — backend source: `ssh.rs` (SSH/SFTP sessions over russh), `main.rs` and `lib.rs` (app entry and command registration).

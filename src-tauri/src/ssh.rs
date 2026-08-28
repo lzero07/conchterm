@@ -111,6 +111,8 @@ async fn authenticate(
 pub struct SshSession {
     handle: Mutex<client::Handle<ClientHandler>>,
     params: ConnectParams,
+    /// 连接代数：StrictMode 双挂载时用于仲裁保留哪一代会话
+    gen: u32,
     /// 终端通道的写半部：键盘输入、窗口 resize 都走这里
     channel_writer: ChannelWriteHalf<russh::client::Msg>,
     /// SFTP 独立连接（懒加载）
@@ -134,6 +136,7 @@ pub struct SessionMap(pub Mutex<HashMap<String, Arc<SshSession>>>);
 #[tauri::command]
 pub async fn ssh_connect(
     params: ConnectParams,
+    gen: u32,
     on_output: Channel<Vec<u8>>,
     sessions: State<'_, SessionMap>,
 ) -> Result<ConnectResult, String> {
@@ -199,9 +202,39 @@ pub async fn ssh_connect(
         }
     });
 
+    // 同一标签页重连时（如 React StrictMode 双挂载）替换旧会话，
+    // 按代数仲裁：仅保留最新一代连接，慢完成的旧连接自行退出，
+    // 避免其顶掉活跃的新会话导致终端无输出、无法输入
+    {
+        let mut map = sessions.0.lock().await;
+        match map.remove(&params.id) {
+            Some(old) if old.gen > gen => {
+                map.insert(params.id, old);
+                drop(map);
+                let _ = handle
+                    .disconnect(Disconnect::ByApplication, "superseded", "")
+                    .await;
+                return Ok(ConnectResult {
+                    ok: true,
+                    message: "superseded".into(),
+                });
+            }
+            Some(old) => {
+                drop(map);
+                old.close_sftp().await;
+                let old_handle = old.handle.lock().await;
+                let _ = old_handle
+                    .disconnect(Disconnect::ByApplication, "reconnect", "")
+                    .await;
+            }
+            None => {}
+        }
+    }
+
     let session = Arc::new(SshSession {
         handle: Mutex::new(handle),
         params: params.clone(),
+        gen,
         channel_writer,
         sftp: Mutex::new(None),
     });

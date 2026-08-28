@@ -1,8 +1,8 @@
-# ShellTool
+# ConchTerm
 
 [简体中文](./README.md) | English
 
-ShellTool is a cross-platform desktop SSH client built with Tauri 2 +
+ConchTerm is a cross-platform desktop SSH client built with Tauri 2 +
 Rust + React + TypeScript, aiming to rival XShell / MobaXterm / FinalShell.
 The React frontend handles UI and interaction, while the Rust backend
 implements SSH and SFTP via russh. The two communicate over Tauri IPC.
@@ -85,7 +85,7 @@ npm run tauri build
 ## Project Structure
 
 ```
-shelltool/
+conchterm/
 ├── src/                      # Frontend source (React + TypeScript)
 │   ├── App.tsx               # App layout and terminal tab state
 │   ├── api.ts                # Tauri invoke wrappers and types

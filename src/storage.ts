@@ -13,12 +13,14 @@ export interface ServerProfile {
   createdAt: number;
 }
 
-const STORAGE_KEY = "shelltool.servers";
+const STORAGE_KEY = "conchterm.servers";
+const LEGACY_STORAGE_KEY = "shelltool.servers";
 
 // MVP 用 localStorage；TODO: 迁移到 Rust 端 + OS 凭据管理器加密存储
 export function loadServers(): ServerProfile[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw =
+      localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY);
     return raw ? (JSON.parse(raw) as ServerProfile[]) : [];
   } catch {
     return [];

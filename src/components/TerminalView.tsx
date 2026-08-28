@@ -15,6 +15,10 @@ interface Props {
   onStatus?: (status: "connected" | "failed") => void;
 }
 
+// 每个会话键的连接代数：清理时仅当仍是最新一代才真正断开，
+// 避免 StrictMode 双挂载时旧的异步断开跑在新连接之后、把新会话杀掉
+const disconnectGenerators = new Map<string, number>();
+
 function charWidth(code: number): number {
   // CJK 表意文字、假名、谚文及全角形式按 2 列；制表符/✓ 等歧义宽度字符按 1 列
   if (
@@ -100,6 +104,9 @@ export default function TerminalView({ sessionKey, params, onStatus }: Props) {
 
     let disposed = false;
 
+    const connectGen = (disconnectGenerators.get(sessionKey) ?? 0) + 1;
+    disconnectGenerators.set(sessionKey, connectGen);
+
     // MobaXterm 风格的会话信息横幅
     const showBanner = () => {
       const IW = 48; // 横幅内宽（两边界框之间）
@@ -125,7 +132,7 @@ export default function TerminalView({ sessionKey, params, onStatus }: Props) {
       const lines = [
         bar("┌", "┐"),
         blank,
-        text("ShellTool · SSH 终端", "\x1b[1;36m"),
+        text("ConchTerm · SSH 终端", "\x1b[1;36m"),
         blank,
         kv("会话", `${params.username}@${params.host}:${params.port}`, "\x1b[37m"),
         kv("认证", authMethod, "\x1b[37m"),
@@ -136,7 +143,7 @@ export default function TerminalView({ sessionKey, params, onStatus }: Props) {
       term.write(lines.join("\r\n") + "\r\n\r\n");
     };
 
-    sshConnect(params, (data) => {
+    sshConnect(params, connectGen, (data) => {
       if (!disposed) term.write(data);
     })
       .then((res) => {
@@ -162,7 +169,14 @@ export default function TerminalView({ sessionKey, params, onStatus }: Props) {
       inputHandler.dispose();
       resizeObserver.disconnect();
       import("../api").then(({ sshDisconnect }) =>
-        sshDisconnect(sessionKey).catch(() => {})
+        {
+          // 仅当本次连接仍是该会话键的最新一代时才真正断开；
+          // StrictMode 双挂载时旧清理的断开会晚于新连接完成，跳过以免杀掉新会话
+          if (disconnectGenerators.get(sessionKey) === connectGen) {
+            disconnectGenerators.delete(sessionKey);
+            sshDisconnect(sessionKey).catch(() => {});
+          }
+        }
       );
       term.dispose();
     };

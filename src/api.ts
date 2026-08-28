@@ -25,6 +25,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 /** 建立 SSH 连接并启动 shell；onData 接收远端输出字节流 */
 export async function sshConnect(
   params: ConnectParams,
+  gen: number,
   onData: (data: Uint8Array) => void
 ): Promise<{ ok: boolean; message: string }> {
   const channel = new Channel<Array<number>>();
@@ -33,6 +34,7 @@ export async function sshConnect(
   };
   const result = await invoke<{ ok: boolean; message: string }>("ssh_connect", {
     params,
+    gen,
     onOutput: channel,
   });
   return result;
