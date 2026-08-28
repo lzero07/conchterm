@@ -1,4 +1,4 @@
-# CI 流水线：前端类型检查与打包 + Rust 后端编译检查
+# CI 流水线：前端类型检查与打包 + Rust 后端格式、lint、编译检查
 name: CI
 
 on:
@@ -32,7 +32,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-      - name: Cargo check
-        run: cargo check
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Cargo fmt
+        run: cargo fmt --check
+        working-directory: src-tauri
+
+      - name: Cargo clippy
+        run: cargo clippy -- -D warnings
         working-directory: src-tauri
