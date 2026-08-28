@@ -319,7 +319,10 @@ pub struct SftpClient {
     id_names: Mutex<Option<Arc<IdNames>>>,
 }
 
-async fn get_or_init_sftp(session: &SshSession, refresh: bool) -> Result<Arc<SftpClient>, String> {
+pub(crate) async fn get_or_init_sftp(
+    session: &SshSession,
+    refresh: bool,
+) -> Result<Arc<SftpClient>, String> {
     if !refresh {
         if let Some(existing) = session.sftp.lock().await.as_ref() {
             return Ok(existing.clone());
@@ -537,15 +540,43 @@ pub async fn sftp_remove(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在".to_string())?;
-    let path_ref = &path;
-    sftp_op(&session, "删除", |sftp| async move {
-        if is_dir {
-            sftp.inner.lock().await.remove_dir(path_ref).await
-        } else {
-            sftp.inner.lock().await.remove_file(path_ref).await
+    let p1 = path.clone();
+    let p2 = path.clone();
+    sftp_op(&session, "删除", move |sftp| {
+        let path = p1.clone();
+        let retry_path = p2.clone();
+        async move {
+            let inner = sftp.inner.lock().await;
+            if is_dir {
+                // 递归删除：目录可能非空（SFTP 的 remove_dir 只能删空目录）
+                remove_recursive(&inner, &path).await
+            } else {
+                inner.remove_file(&retry_path).await
+            }
         }
     })
     .await
+}
+
+/// 递归删除远端目录及其全部内容
+async fn remove_recursive(
+    sftp: &russh_sftp::client::SftpSession,
+    path: &str,
+) -> Result<(), russh_sftp::client::error::Error> {
+    let entries = sftp.read_dir(path).await?;
+    for entry in entries {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let child = format!("{}/{}", path.trim_end_matches('/'), name);
+        if entry.metadata().is_dir() {
+            Box::pin(remove_recursive(sftp, &child)).await?;
+        } else {
+            sftp.remove_file(&child).await?;
+        }
+    }
+    sftp.remove_dir(path).await
 }
 
 #[tauri::command]
