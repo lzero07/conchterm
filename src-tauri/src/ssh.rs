@@ -178,10 +178,10 @@ pub async fn ssh_connect(
     tokio::spawn(async move {
         loop {
             match read_half.wait().await {
-                Some(russh::ChannelMsg::Data { ref data }) => {
-                    if on_output.send(data.to_vec()).is_err() {
-                        break; // 前端已关闭
-                    }
+                Some(russh::ChannelMsg::Data { ref data })
+                    if on_output.send(data.to_vec()).is_err() =>
+                {
+                    break; // 前端已关闭
                 }
                 Some(russh::ChannelMsg::ExtendedData { ref data, ext: 1 }) => {
                     // stderr 也并入终端显示
