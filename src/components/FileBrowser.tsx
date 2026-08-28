@@ -4,16 +4,28 @@ import {
   Folder,
   FolderPlus,
   Copy,
+  Download,
   FolderOpen,
+  FolderUp,
   Pencil,
   RefreshCw,
+  Upload,
   Trash2,
 } from "lucide-react";
+import {
+  confirm as confirmDialog,
+  open as openFileDialog,
+  save as saveFileDialog,
+} from "@tauri-apps/plugin-dialog";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   sftpList,
   sftpMkdir,
   sftpRemove,
   sftpRename,
+  sftpUpload,
+  sftpDownload,
+  sftpExists,
   type RemoteFile,
 } from "../api";
 
@@ -68,6 +80,8 @@ export default function FileBrowser({ sessionId }: Props) {
   const [loading, setLoading] = useState(false);
   const [editingPath, setEditingPath] = useState(false);
   const [pathDraft, setPathDraft] = useState(path);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -79,6 +93,8 @@ export default function FileBrowser({ sessionId }: Props) {
   const lastClickRef = useRef<{ name: string; time: number } | null>(null);
   const renameTimerRef = useRef<number | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const uploadHandlerRef = useRef<(paths: string[]) => void>(() => {});
 
   const refresh = useCallback(
     async (target: string) => {
@@ -207,6 +223,144 @@ export default function FileBrowser({ sessionId }: Props) {
     }
   };
 
+  const uploadPaths = async (paths: string[]) => {
+    // 忽略拖出功能产生的临时文件（把刚拖出去的文件又拖回来会命中这里），
+    // 否则会把 时间戳-文件名 的临时目录上传到服务器造成垃圾文件
+    const isDragTemp = (p: string) =>
+      p.replace(/\\/g, "/").includes("/conchterm-drag/");
+    const filtered = paths.filter((p) => !isDragTemp(p));
+    if (filtered.length === 0) return;
+    // 同名冲突检查：存在同名时询问覆盖或跳过（仅检查顶层名称）
+    const targets: { local: string; remote: string; name: string }[] = [];
+    const conflicts: string[] = [];
+    for (const p of filtered) {
+      const name = p.split(/[\\/]/).pop() ?? "file";
+      const remote = path === "/" ? `/${name}` : `${path}/${name}`;
+      targets.push({ local: p, remote, name });
+      try {
+        if (await sftpExists(sessionId, remote)) conflicts.push(name);
+      } catch (e) {
+        setError(`检查 ${name} 是否存在失败: ${e}`);
+        return;
+      }
+    }
+    if (conflicts.length) {
+      const overwrite = await confirmDialog(
+        conflicts.length === 1
+          ? `「${conflicts[0]}」已存在，是否覆盖？`
+          : `发现 ${conflicts.length} 个同名文件/文件夹，是否全部覆盖？`,
+        {
+          title: "覆盖确认",
+          kind: "warning",
+          okLabel: "覆盖",
+          cancelLabel: conflicts.length === 1 ? "取消" : "跳过",
+        }
+      );
+      if (!overwrite) {
+        if (conflicts.length >= targets.length) return;
+        const conflictSet = new Set(conflicts);
+        await uploadTargets(targets.filter((t) => !conflictSet.has(t.name)));
+        return;
+      }
+    }
+    await uploadTargets(targets);
+  };
+
+  const uploadTargets = async (
+    targets: { local: string; remote: string; name: string }[]
+  ) => {
+    setUploading(true);
+    try {
+      const errors: string[] = [];
+      for (const t of targets) {
+        try {
+          await sftpUpload(sessionId, t.local, t.remote);
+        } catch (e) {
+          errors.push(`${t.name}: ${e}`);
+        }
+      }
+      if (errors.length) setError(errors.join("；"));
+      refresh(path);
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  // 拖放订阅的回调通过 ref 取最新闭包，避免 path/sessionId 过期
+  uploadHandlerRef.current = (paths: string[]) => {
+    void uploadPaths(paths);
+  };
+
+  useEffect(() => {
+    if (!sessionId) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === "leave") {
+          setDragOver(false);
+          return;
+        }
+        const rect = panelRef.current?.getBoundingClientRect();
+        if (!rect) return;
+        const dpr = window.devicePixelRatio || 1;
+        const pos = event.payload.position;
+        const inside =
+          pos.x / dpr >= rect.left &&
+          pos.x / dpr <= rect.right &&
+          pos.y / dpr >= rect.top &&
+          pos.y / dpr <= rect.bottom;
+        if (event.payload.type === "drop") {
+          setDragOver(false);
+          if (inside && event.payload.paths.length) {
+            uploadHandlerRef.current(event.payload.paths);
+          }
+        } else {
+          setDragOver(inside);
+        }
+      })
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  const uploadFiles = async () => {
+    const selected = await openFileDialog({
+      multiple: true,
+      title: "选择要上传的文件",
+    });
+    if (!selected) return;
+    await uploadPaths(Array.isArray(selected) ? selected : [selected]);
+  };
+
+  const uploadFolder = async () => {
+    const selected = await openFileDialog({
+      directory: true,
+      title: "选择要上传的文件夹",
+    });
+    if (!selected) return;
+    await uploadPaths(Array.isArray(selected) ? selected : [selected]);
+  };
+
+  const downloadFile = async (f: RemoteFile) => {
+    const target = await saveFileDialog({
+      defaultPath: f.name,
+      title: "保存下载文件",
+    });
+    if (!target) return;
+    try {
+      await sftpDownload(sessionId, fullPath(f.name), target);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const closeContextMenu = () => setContextMenu(null);
 
   useEffect(() => {
@@ -241,7 +395,7 @@ export default function FileBrowser({ sessionId }: Props) {
   };
 
   return (
-    <div className="file-browser">
+    <div className="file-browser" ref={panelRef}>
       <div className="breadcrumb">
         {editingPath ? (
           <input
@@ -289,7 +443,24 @@ export default function FileBrowser({ sessionId }: Props) {
         >
           <FolderPlus size={13} strokeWidth={1.8} />
         </button>
+        <button
+          className="ghost-btn"
+          title={uploading ? "上传中…" : "上传文件到当前目录"}
+          disabled={uploading}
+          onClick={uploadFiles}
+        >
+          <Upload size={13} strokeWidth={1.8} />
+        </button>
+        <button
+          className="ghost-btn"
+          title={uploading ? "上传中…" : "上传文件夹（含内部结构）"}
+          disabled={uploading}
+          onClick={uploadFolder}
+        >
+          <FolderUp size={13} strokeWidth={1.8} />
+        </button>
       </div>
+      {uploading && <div className="upload-hint">正在上传文件…</div>}
       {error && <div className="empty-hint error">{error}</div>}
       {loading ? (
         <div className="empty-hint">加载中…</div>
@@ -403,6 +574,12 @@ export default function FileBrowser({ sessionId }: Props) {
           </table>
         </div>
       )}
+      {dragOver && (
+        <div className="drop-overlay">
+          <Upload size={28} strokeWidth={1.5} />
+          <p>松开上传到当前目录</p>
+        </div>
+      )}
       {contextMenu && (
         <>
           <div
@@ -431,6 +608,19 @@ export default function FileBrowser({ sessionId }: Props) {
               >
                 <FolderOpen size={14} strokeWidth={1.8} />
                 打开
+              </button>
+            )}
+            {!contextMenu.file.isDir && (
+              <button
+                className="ctx-item"
+                onClick={() => {
+                  const f = contextMenu.file;
+                  closeContextMenu();
+                  downloadFile(f);
+                }}
+              >
+                <Download size={14} strokeWidth={1.8} />
+                下载
               </button>
             )}
             <button

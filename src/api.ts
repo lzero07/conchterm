@@ -75,3 +75,26 @@ export function sftpRename(
 ): Promise<void> {
   return invoke("sftp_rename", { sessionId, oldPath, newPath });
 }
+
+export function sftpUpload(
+  sessionId: string,
+  localPath: string,
+  remotePath: string
+): Promise<void> {
+  return invoke("sftp_upload", { sessionId, localPath, remotePath });
+}
+
+export function sftpDownload(
+  sessionId: string,
+  remotePath: string,
+  localPath: string
+): Promise<void> {
+  return invoke("sftp_download", { sessionId, remotePath, localPath });
+}
+
+export function sftpExists(
+  sessionId: string,
+  remotePath: string
+): Promise<boolean> {
+  return invoke("sftp_exists", { sessionId, remotePath });
+}

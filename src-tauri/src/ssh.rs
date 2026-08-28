@@ -7,6 +7,7 @@
 //! - 键盘输入由前端 invoke("ssh_write") 发过来，写入 channel stdin
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use russh::client::{self, Handler};
@@ -599,4 +600,122 @@ pub async fn sftp_rename(
         sftp.inner.lock().await.rename(old_ref, new_ref).await
     })
     .await
+}
+
+#[tauri::command]
+pub async fn sftp_upload(
+    session_id: String,
+    local_path: String,
+    remote_path: String,
+    sessions: State<'_, SessionMap>,
+) -> Result<(), String> {
+    let session = sessions
+        .0
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "会话不存在".to_string())?;
+    let sftp = get_or_init_sftp(&session, false).await?;
+
+    let inner = sftp.inner.lock().await;
+    upload_recursive(&inner, Path::new(&local_path), &remote_path).await
+}
+
+/// 递归上传：目录会连同内部结构一起创建并逐个传输文件
+async fn upload_recursive(
+    sftp: &russh_sftp::client::SftpSession,
+    local: &Path,
+    remote: &str,
+) -> Result<(), String> {
+    if local.is_dir() {
+        // 已存在等情况忽略，子项写入失败时会有更明确的错误
+        let _ = sftp.create_dir(remote).await;
+        let mut entries = tokio::fs::read_dir(local)
+            .await
+            .map_err(|e| format!("读取本地目录失败: {e}"))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| format!("读取本地目录失败: {e}"))?
+        {
+            let child_remote = format!(
+                "{}/{}",
+                remote.trim_end_matches('/'),
+                entry.file_name().to_string_lossy()
+            );
+            Box::pin(upload_recursive(sftp, &entry.path(), &child_remote)).await?;
+        }
+        return Ok(());
+    }
+
+    let mut local_file = tokio::fs::File::open(local)
+        .await
+        .map_err(|e| format!("打开本地文件失败: {e}"))?;
+    let mut remote_file = sftp
+        .create(remote)
+        .await
+        .map_err(|e| format!("创建远端文件失败: {e}"))?;
+
+    tokio::io::copy(&mut local_file, &mut remote_file)
+        .await
+        .map_err(|e| format!("上传失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_download(
+    session_id: String,
+    remote_path: String,
+    local_path: String,
+    sessions: State<'_, SessionMap>,
+) -> Result<(), String> {
+    let session = sessions
+        .0
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "会话不存在".to_string())?;
+    let sftp = get_or_init_sftp(&session, false).await?;
+
+    let mut remote = {
+        let inner = sftp.inner.lock().await;
+        inner
+            .open(&remote_path)
+            .await
+            .map_err(|e| format!("打开远端文件失败: {e}"))?
+    };
+    let mut local = tokio::fs::File::create(&local_path)
+        .await
+        .map_err(|e| format!("创建本地文件失败: {e}"))?;
+
+    tokio::io::copy(&mut remote, &mut local)
+        .await
+        .map_err(|e| format!("下载失败: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sftp_exists(
+    session_id: String,
+    remote_path: String,
+    sessions: State<'_, SessionMap>,
+) -> Result<bool, String> {
+    let session = sessions
+        .0
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "会话不存在".to_string())?;
+    let sftp = get_or_init_sftp(&session, false).await?;
+    let exists = {
+        let inner = sftp.inner.lock().await;
+        inner
+            .try_exists(&remote_path)
+            .await
+            .map_err(|e| format!("检查文件失败: {e}"))?
+    };
+    Ok(exists)
 }

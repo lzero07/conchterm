@@ -132,7 +132,7 @@ When adding tests, prefer Vitest for frontend logic
 
 ## Roadmap
 
-- [ ] SFTP upload / download (progress bar, resumable transfers)
+- [x] SFTP upload / download (multi-select, drag-and-drop upload, right-click download; progress bar and resume pending)
 - [ ] known_hosts host key verification + first-connect fingerprint prompt
 - [ ] Migrate credentials to OS credential manager with encryption
 - [ ] Connection monitoring panel (CPU / memory / network charts,
