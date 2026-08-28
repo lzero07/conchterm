@@ -142,17 +142,16 @@ pub async fn ssh_connect(
 ) -> Result<ConnectResult, String> {
     let handler = ClientHandler;
 
-    let mut handle = client::connect(
-        ssh_config(),
-        (params.host.as_str(), params.port),
-        handler,
-    )
-    .await
-    .map_err(|e| format!("连接失败: {e}"))?;
+    let mut handle = client::connect(ssh_config(), (params.host.as_str(), params.port), handler)
+        .await
+        .map_err(|e| format!("连接失败: {e}"))?;
 
     // ---- 认证 ----
     if let Err(e) = authenticate(&mut handle, &params).await {
-        return Ok(ConnectResult { ok: false, message: e });
+        return Ok(ConnectResult {
+            ok: false,
+            message: e,
+        });
     }
 
     // ---- 开启 PTY + shell ----
@@ -241,7 +240,10 @@ pub async fn ssh_connect(
 
     sessions.0.lock().await.insert(params.id, session);
 
-    Ok(ConnectResult { ok: true, message: "connected".into() })
+    Ok(ConnectResult {
+        ok: true,
+        message: "connected".into(),
+    })
 }
 
 /// 向终端写入键盘输入 / resize 控制序列以外的原始字节
@@ -258,11 +260,7 @@ pub async fn ssh_write(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在".to_string())?;
-    match session
-        .channel_writer
-        .data_bytes(data)
-        .await
-    {
+    match session.channel_writer.data_bytes(data).await {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("写入失败: {e:?}")),
     }
@@ -283,11 +281,7 @@ pub async fn ssh_resize(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在".to_string())?;
-    match session
-        .channel_writer
-        .window_change(cols, rows, 0, 0)
-        .await
-    {
+    match session.channel_writer.window_change(cols, rows, 0, 0).await {
         Ok(_) => Ok(()),
         Err(e) => Err(format!("调整窗口失败: {e:?}")),
     }
@@ -325,10 +319,7 @@ pub struct SftpClient {
     id_names: Mutex<Option<Arc<IdNames>>>,
 }
 
-async fn get_or_init_sftp(
-    session: &SshSession,
-    refresh: bool,
-) -> Result<Arc<SftpClient>, String> {
+async fn get_or_init_sftp(session: &SshSession, refresh: bool) -> Result<Arc<SftpClient>, String> {
     if !refresh {
         if let Some(existing) = session.sftp.lock().await.as_ref() {
             return Ok(existing.clone());
@@ -388,7 +379,9 @@ async fn load_id_names(sftp: &russh_sftp::client::SftpSession) -> IdNames {
                     map.users.insert(uid, parts[0].to_string());
                 }
                 if let Ok(gid) = parts[3].parse::<u32>() {
-                    map.groups.entry(gid).or_insert_with(|| parts[0].to_string());
+                    map.groups
+                        .entry(gid)
+                        .or_insert_with(|| parts[0].to_string());
                 }
             }
         }
@@ -416,11 +409,7 @@ async fn get_id_names(client: &SftpClient) -> Option<Arc<IdNames>> {
 }
 
 /// 执行一次 SFTP 操作；失败视为连接失效，自动重建连接重试一次
-async fn sftp_op<T, E, Fut, F>(
-    session: &SshSession,
-    label: &str,
-    op: F,
-) -> Result<T, String>
+async fn sftp_op<T, E, Fut, F>(session: &SshSession, label: &str, op: F) -> Result<T, String>
 where
     F: Fn(Arc<SftpClient>) -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
@@ -506,7 +495,11 @@ pub async fn sftp_list(
             group,
         });
     }
-    files.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    files.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
     Ok(files)
 }
 

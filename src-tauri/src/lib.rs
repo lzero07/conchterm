@@ -9,7 +9,9 @@ use tokio::sync::Mutex;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(SessionMap(Mutex::new(HashMap::<String, Arc<SshSession>>::new())))
+        .manage(SessionMap(Mutex::new(
+            HashMap::<String, Arc<SshSession>>::new(),
+        )))
         .invoke_handler(tauri::generate_handler![
             ssh::ssh_connect,
             ssh::ssh_write,
