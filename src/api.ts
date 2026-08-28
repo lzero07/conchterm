@@ -98,3 +98,17 @@ export function sftpExists(
 ): Promise<boolean> {
   return invoke("sftp_exists", { sessionId, remotePath });
 }
+
+/** 预下载远端文件到临时目录（鼠标按下时调用，为拖出做准备），返回本地路径 */
+export function prepareFileDrag(
+  sessionId: string,
+  remotePath: string,
+  fileName: string
+): Promise<string> {
+  return invoke("prepare_file_drag", { sessionId, remotePath, fileName });
+}
+
+/** 基于已就绪的本地文件发起原生拖拽（拖出到资源管理器） */
+export function startFileDrag(localPath: string): Promise<void> {
+  return invoke("start_file_drag", { localPath });
+}

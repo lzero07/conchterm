@@ -25,12 +25,26 @@ import {
   sftpRename,
   sftpUpload,
   sftpDownload,
+  prepareFileDrag,
   sftpExists,
+  startFileDrag,
   type RemoteFile,
 } from "../api";
 
 interface Props {
   sessionId: string | null;
+}
+
+/** 一次潜在拖出操作的状态：按下时开始预下载，超阈值且就绪后才真正发起 */
+interface DragStartState {
+  name: string;
+  x: number;
+  y: number;
+  started: boolean;
+  /** 预下载完成后的本地路径；null 表示尚未就绪 */
+  localPath: string | null;
+  /** 已移出阈值但内容仍在下载，等待就绪后自动开始 */
+  waitingBeyondThreshold: boolean;
 }
 
 function formatSize(size: number): string {
@@ -82,6 +96,8 @@ export default function FileBrowser({ sessionId }: Props) {
   const [pathDraft, setPathDraft] = useState(path);
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  /** 拖出时内容仍在下载：显示“准备中”光标提示 */
+  const [dragPreparing, setDragPreparing] = useState(false);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -92,6 +108,7 @@ export default function FileBrowser({ sessionId }: Props) {
   const renamingRef = useRef<string | null>(null);
   const lastClickRef = useRef<{ name: string; time: number } | null>(null);
   const renameTimerRef = useRef<number | null>(null);
+  const dragStartRef = useRef<DragStartState | null>(null);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const uploadHandlerRef = useRef<(paths: string[]) => void>(() => {});
@@ -178,6 +195,69 @@ export default function FileBrowser({ sessionId }: Props) {
   const handleParentClick = () => {
     cancelPendingRename();
     setSelectedName("..");
+  };
+
+  // 拖出到资源管理器（两段式）：
+  // 按下 → 立即预下载到本地临时目录（prepareFileDrag）
+  // 移动超阈值 → 文件已就绪，立刻发起原生拖拽（startFileDrag）
+  // 这样 DoDragDrop 启动时左键必然仍按着，时序合法，不会卡死系统拖拽
+  const handleNameMouseDown = (f: RemoteFile, e: React.MouseEvent) => {
+    if (e.button !== 0) {
+      dragStartRef.current = null;
+      return;
+    }
+    const st: DragStartState = {
+      name: f.name,
+      x: e.clientX,
+      y: e.clientY,
+      started: false,
+      localPath: null,
+      waitingBeyondThreshold: false,
+    };
+    dragStartRef.current = st;
+    void prepareFileDrag(sessionId, fullPath(f.name), f.name)
+      .then((p) => {
+        if (dragStartRef.current !== st) return; // 已取消（松开/移出）
+        st.localPath = p;
+        // 若用户已按住并移出阈值在等待，就绪后立即开始拖拽
+        if (st.waitingBeyondThreshold && !st.started) {
+          st.started = true;
+          setDragPreparing(false);
+          void startFileDrag(p).catch((err) => setError(String(err)));
+        }
+      })
+      .catch((err) => {
+        setDragPreparing(false);
+        if (dragStartRef.current === st && st.waitingBeyondThreshold) {
+          setError(String(err));
+        }
+      });
+  };
+
+  const handleNameMouseMove = (f: RemoteFile, e: React.MouseEvent) => {
+    const st = dragStartRef.current;
+    if (!st || st.started || st.name !== f.name) return;
+    if (!(e.buttons & 1)) {
+      dragStartRef.current = null;
+      setDragPreparing(false);
+      return;
+    }
+    if (Math.hypot(e.clientX - st.x, e.clientY - st.y) > 6) {
+      if (st.localPath) {
+        // 文件/目录已就绪：立即开始原生拖拽
+        st.started = true;
+        void startFileDrag(st.localPath).catch((err) => setError(String(err)));
+      } else if (!st.waitingBeyondThreshold) {
+        // 还在下载：显示准备状态，下载完成后自动开始（见 mousedown 回调）
+        st.waitingBeyondThreshold = true;
+        setDragPreparing(true);
+      }
+    }
+  };
+
+  const handleNameMouseUp = () => {
+    dragStartRef.current = null;
+    setDragPreparing(false);
   };
 
   const fullPath = (name: string) => (path === "/" ? `/${name}` : `${path}/${name}`);
@@ -517,7 +597,11 @@ export default function FileBrowser({ sessionId }: Props) {
                         .filter(Boolean)
                         .join(" ")
                     }
+                    style={dragPreparing ? { cursor: "progress" } : undefined}
                     onClick={() => handleNameClick(f)}
+                    onMouseDown={(e) => handleNameMouseDown(f, e)}
+                    onMouseMove={(e) => handleNameMouseMove(f, e)}
+                    onMouseUp={handleNameMouseUp}
                   >
                     <span className="file-icon">
                       {f.isDir ? (

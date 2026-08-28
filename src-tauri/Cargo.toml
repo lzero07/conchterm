@@ -30,3 +30,5 @@ dirs = "6"
 base64 = "0.22"
 rand = "0.9"
 tauri-plugin-dialog = "2.7.2"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-core = "0.61"
