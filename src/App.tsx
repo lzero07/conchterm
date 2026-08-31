@@ -1,14 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
+  Copy,
   FolderOpen,
+  Minus,
   Pencil,
   Plus,
   Server,
+  Square,
   Terminal,
   Trash2,
   X,
 } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView";
 import ServerForm from "./components/ServerForm";
 import FileBrowser from "./components/FileBrowser";
@@ -28,12 +32,15 @@ interface TermTab {
   params: ConnectParams;
 }
 
-type SidebarTab = "servers" | "files" | "agent";
+type SidebarTab = "servers" | "files";
 
 type SessionStatus = "connected" | "failed";
 
 const DEFAULT_SIDEBAR_WIDTH = 272;
 const SIDEBAR_STORAGE_KEY = "sidebarWidth";
+const DEFAULT_AGENT_DOCK_WIDTH = 360;
+const AGENT_DOCK_WIDTH_KEY = "agentDockWidth";
+const AGENT_DOCK_OPEN_KEY = "agentDockOpen";
 
 export default function App() {
   const [servers, setServers] = useState<ServerProfile[]>(loadServers);
@@ -49,6 +56,34 @@ export default function App() {
     const saved = parseInt(localStorage.getItem(SIDEBAR_STORAGE_KEY) ?? "", 10);
     return Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_SIDEBAR_WIDTH;
   });
+  const [agentDockOpen, setAgentDockOpen] = useState<boolean>(
+    () => localStorage.getItem(AGENT_DOCK_OPEN_KEY) === "1"
+  );
+  const [agentDockWidth, setAgentDockWidth] = useState<number>(() => {
+    const saved = parseInt(
+      localStorage.getItem(AGENT_DOCK_WIDTH_KEY) ?? "",
+      10
+    );
+    return Number.isFinite(saved) && saved > 0
+      ? saved
+      : DEFAULT_AGENT_DOCK_WIDTH;
+  });
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  // 跟踪最大化状态，切换标题栏的 最大化/还原 图标
+  useEffect(() => {
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    win
+      .onResized(async () => {
+        setIsMaximized(await win.isMaximized());
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    win.isMaximized().then(setIsMaximized).catch(() => {});
+    return () => unlisten?.();
+  }, []);
 
   // 文件面板跟随当前活跃终端的会话
   const activeSessionId = activeKey;
@@ -127,6 +162,40 @@ export default function App() {
     localStorage.setItem(SIDEBAR_STORAGE_KEY, String(DEFAULT_SIDEBAR_WIDTH));
   };
 
+  const toggleAgentDock = () => {
+    const next = !agentDockOpen;
+    setAgentDockOpen(next);
+    localStorage.setItem(AGENT_DOCK_OPEN_KEY, next ? "1" : "0");
+  };
+
+  const startAgentDockResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = agentDockWidth;
+    let width = startWidth;
+    document.body.classList.add("resizing");
+    const onMove = (ev: MouseEvent) => {
+      width = Math.min(Math.max(startWidth + (startX - ev.clientX), 320), 560);
+      setAgentDockWidth(width);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("resizing");
+      localStorage.setItem(AGENT_DOCK_WIDTH_KEY, String(width));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  const resetAgentDockWidth = () => {
+    setAgentDockWidth(DEFAULT_AGENT_DOCK_WIDTH);
+    localStorage.setItem(
+      AGENT_DOCK_WIDTH_KEY,
+      String(DEFAULT_AGENT_DOCK_WIDTH)
+    );
+  };
+
   const terminalViews = useMemo(
     () =>
       tabs.map((t) => (
@@ -149,7 +218,55 @@ export default function App() {
   );
 
   return (
-    <div className="app-shell">
+    <div className="app-root">
+      {/* 自定义标题栏 */}
+      <div className="title-bar" data-tauri-drag-region>
+        <img
+          className="title-app-icon"
+          src="/app-icon.png"
+          alt="ConchTerm"
+          data-tauri-drag-region
+        />
+        <span className="title-app-name" data-tauri-drag-region>
+          ConchTerm
+        </span>
+        <div className="title-actions">
+          <button
+            className={`title-ai${agentDockOpen ? " active" : ""}`}
+            title="AI 助手"
+            onClick={toggleAgentDock}
+          >
+            <Bot size={20} strokeWidth={2} />
+          </button>
+          <button
+            className="title-btn"
+            title="最小化"
+            onClick={() => void getCurrentWindow().minimize()}
+          >
+            <Minus size={14} strokeWidth={1.8} />
+          </button>
+          <button
+            className="title-btn"
+            title={isMaximized ? "向下还原" : "最大化"}
+            onClick={() => void getCurrentWindow().toggleMaximize()}
+          >
+            {isMaximized ? (
+              <Copy size={12} strokeWidth={1.8} />
+            ) : (
+              <Square size={12} strokeWidth={1.8} />
+            )}
+          </button>
+          <button
+            className="title-btn close"
+            title="关闭"
+            onClick={() => void getCurrentWindow().close()}
+          >
+            <X size={14} strokeWidth={1.8} />
+          </button>
+        </div>
+      </div>
+
+      <div className="app-shell">
       {/* 最左侧功能按钮条 */}
       <nav className="activity-bar">
         <button
@@ -165,13 +282,6 @@ export default function App() {
           onClick={() => setSidebarTab("files")}
         >
           <FolderOpen size={19} strokeWidth={1.8} />
-        </button>
-        <button
-          className={`act-btn ${sidebarTab === "agent" ? "active" : ""}`}
-          title="AI 助手"
-          onClick={() => setSidebarTab("agent")}
-        >
-          <Bot size={19} strokeWidth={1.8} />
         </button>
       </nav>
 
@@ -256,13 +366,8 @@ export default function App() {
               )}
             </ul>
           </div>
-        ) : sidebarTab === "files" ? (
-          <FileBrowser sessionId={activeSessionId} />
         ) : (
-          <AgentPanel
-            sessions={tabs.map((t) => ({ id: t.key, title: t.title }))}
-            activeTerminalId={activeKey}
-          />
+          <FileBrowser sessionId={activeSessionId} />
         )}
       </aside>
 
@@ -311,6 +416,24 @@ export default function App() {
         </div>
       </main>
 
+      {/* AI 助手右侧面板 */}
+      {agentDockOpen && (
+        <>
+          <div
+            className="agent-dock-resizer"
+            title="拖动调整宽度（双击恢复默认）"
+            onMouseDown={startAgentDockResize}
+            onDoubleClick={resetAgentDockWidth}
+          />
+          <aside className="agent-dock" style={{ width: agentDockWidth }}>
+            <AgentPanel
+              sessions={tabs.map((t) => ({ id: t.key, title: t.title }))}
+              activeTerminalId={activeKey}
+            />
+          </aside>
+        </>
+      )}
+
       {formOpen && (
         <ServerForm
           initial={editing}
@@ -326,6 +449,7 @@ export default function App() {
           }}
         />
       )}
+      </div>
     </div>
   );
 }

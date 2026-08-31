@@ -101,6 +101,8 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   const [busy, setBusy] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<AgentProvider | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
   const activeStreamRef = useRef<ActiveStream | null>(null);
   const msgsRef = useRef<HTMLDivElement | null>(null);
 
@@ -408,6 +410,29 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     saveSessionIndex(next);
   };
 
+  const startRename = () => {
+    const meta = sessionIndex.sessions.find((s) => s.id === activeSessionId);
+    if (!meta) return;
+    setRenameValue(meta.title);
+    setRenaming(true);
+  };
+
+  const confirmRename = () => {
+    if (!renaming) return;
+    const title = renameValue.trim();
+    if (title && activeSessionId) {
+      const next: AgentSessionIndex = {
+        sessions: sessionIndex.sessions.map((s) =>
+          s.id === activeSessionId ? { ...s, title } : s
+        ),
+        activeId: activeSessionId,
+      };
+      setSessionIndex(next);
+      saveSessionIndex(next);
+    }
+    setRenaming(false);
+  };
+
   const removeSession = (id: string) => {
     if (!confirm("删除当前会话及其聊天记录？")) return;
     stop();
@@ -588,23 +613,46 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
           </div>
 
           <div className="agent-session-bar">
-            <select
-              value={activeSessionId}
-              title="历史会话"
-              onChange={(e) => switchSession(e.target.value)}
-            >
-              {sortedSessions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.title}
-                </option>
-              ))}
-            </select>
+            {renaming ? (
+              <input
+                className="agent-session-input"
+                value={renameValue}
+                autoFocus
+                maxLength={30}
+                title="会话名称（Enter 保存，Esc 取消）"
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") confirmRename();
+                  if (e.key === "Escape") setRenaming(false);
+                }}
+                onBlur={confirmRename}
+              />
+            ) : (
+              <select
+                value={activeSessionId}
+                title="历史会话"
+                onChange={(e) => switchSession(e.target.value)}
+              >
+                {sortedSessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               className="icon-btn"
               title="新建会话"
               onClick={createSession}
             >
               <MessageSquarePlus size={13} strokeWidth={1.8} />
+            </button>
+            <button
+              className="icon-btn"
+              title="重命名会话"
+              onClick={startRename}
+            >
+              <Pencil size={13} strokeWidth={1.8} />
             </button>
             <button
               className="icon-btn danger"

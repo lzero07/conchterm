@@ -96,9 +96,15 @@ button.primary:disabled { opacity: .45; cursor: not-allowed; }
 .ghost-btn svg { display: block; }
 
 /* ---------- 整体三栏 ---------- */
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
 .app-shell {
   display: flex;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .activity-bar {
@@ -178,6 +184,85 @@ body.resizing { cursor: col-resize; }
   flex-direction: column;
   overflow: hidden;
 }
+
+/* ---------- 自定义标题栏 ---------- */
+.title-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  height: 36px;
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--border-soft);
+  user-select: none;
+}
+.title-app-icon {
+  width: 16px;
+  height: 16px;
+  margin-left: 10px;
+  margin-right: 6px;
+  pointer-events: none;
+}
+.title-app-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.title-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  height: 100%;
+}
+.title-ai {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 45px;
+  height: 28px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--text-dim);
+}
+.title-ai:hover { background: var(--bg-3); color: var(--text-0); }
+.title-ai.active {
+  border-color: var(--border);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+.title-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text-dim);
+}
+.title-btn:hover { background: var(--bg-3); color: var(--text-0); }
+.title-btn.close:hover { background: var(--danger); color: #fff; }
+
+/* ---------- AI 助手右侧面板 ---------- */
+
+.agent-dock {
+  flex-shrink: 0;
+  height: 100%;
+  background: var(--bg-1);
+  border-left: 1px solid var(--border);
+  overflow: hidden;
+}
+.agent-dock .panel { width: 100%; }
+.agent-dock-resizer {
+  flex-shrink: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+}
+.agent-dock-resizer:hover { background: var(--accent-soft); }
 
 /* ---------- 侧栏面板 ---------- */
 .panel { display: flex; flex-direction: column; height: 100%; }
@@ -637,6 +722,20 @@ td.dir .file-icon { color: var(--amber); }
   border-radius: var(--radius);
   padding: 5px 8px;
   font-size: 12px;
+}
+.agent-session-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-2);
+  color: var(--text-0);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.agent-session-input:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .agent-msgs {
