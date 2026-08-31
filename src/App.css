@@ -231,6 +231,8 @@ body.resizing { cursor: col-resize; }
   align-items: center;
   height: 100%;
 }
+.title-ai + .title-ai { margin-left: 3px; }
+.title-ai + .title-btn { margin-left: 6px; }
 .title-ai {
   display: inline-flex;
   align-items: center;
