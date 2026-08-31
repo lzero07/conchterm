@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Bot,
+  ChevronRight,
   Eraser,
+  LoaderCircle,
   MessageSquarePlus,
   MessageSquare,
   Pencil,
@@ -49,7 +51,10 @@ import type {
 } from "./types";
 
 interface ActiveStream {
+  /** 请求首个助手条目 id，用于识别过期事件 */
   entryId: string;
+  /** 当前正在流式追加的助手气泡（工具调用后会另起新气泡） */
+  messageEntryId: string;
   requestId: string | null;
   cancelled: boolean;
 }
@@ -98,6 +103,23 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   const [editing, setEditing] = useState<AgentProvider | null>(null);
   const activeStreamRef = useRef<ActiveStream | null>(null);
   const msgsRef = useRef<HTMLDivElement | null>(null);
+
+  // 思考中指示：请求进行中、当前气泡还没有输出、且没有在等确认/执行工具
+  const activeStream = activeStreamRef.current;
+  const waitingTool = entries.some(
+    (e) =>
+      e.kind === "tool" && (e.status === "pending" || e.status === "running")
+  );
+  const currentBubble = entries.find(
+    (e): e is MessageEntry =>
+      e.kind === "message" && e.id === activeStream?.messageEntryId
+  );
+  const thinking =
+    busy &&
+    !waitingTool &&
+    !!activeStream &&
+    !activeStream.cancelled &&
+    (currentBubble?.content ?? "") === "";
 
   const activeProvider =
     providers.find((p) => p.id === activeId) ?? providers[0] ?? null;
@@ -187,6 +209,10 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     );
   };
 
+  const toggleTool = (callId: string) => {
+    updateTool(callId, (t) => ({ ...t, collapsed: !t.collapsed }));
+  };
+
   const finishStream = () => {
     activeStreamRef.current = null;
     setBusy(false);
@@ -198,7 +224,7 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
 
     if (event.type === "delta") {
       if (stream.cancelled) return;
-      updateMessage(entryId, (e) => ({
+      updateMessage(stream.messageEntryId, (e) => ({
         ...e,
         content: e.content + (event.content ?? ""),
       }));
@@ -218,8 +244,18 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
           tool: event.tool ?? "",
           command,
           status: "pending",
+          collapsed: false,
         },
       ]);
+      // 工具之后的文本应显示在命令下方，另起一个助手气泡
+      const nextEntry: MessageEntry = {
+        kind: "message",
+        id: crypto.randomUUID(),
+        role: "assistant",
+        content: "",
+      };
+      setEntries((prev) => [...prev, nextEntry]);
+      stream.messageEntryId = nextEntry.id;
       return;
     }
     if (event.type === "done") {
@@ -228,7 +264,7 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     }
     // error：空 id 表示进程级错误，否则是当前请求失败
     if (!event.id || event.id === stream.requestId) {
-      updateMessage(entryId, (e) => ({
+      updateMessage(stream.messageEntryId, (e) => ({
         ...e,
         content: e.content || event.message || "未知错误",
         error: true,
@@ -281,6 +317,7 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     setBusy(true);
     activeStreamRef.current = {
       entryId: assistantEntry.id,
+      messageEntryId: assistantEntry.id,
       requestId: null,
       cancelled: false,
     };
@@ -402,13 +439,19 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     updateTool(entry.callId, (t) => ({ ...t, status: "running" }));
     try {
       const output = await sshExec(targetSession.id, entry.command);
-      updateTool(entry.callId, (t) => ({ ...t, status: "approved", output }));
+      updateTool(entry.callId, (t) => ({
+        ...t,
+        status: "approved",
+        collapsed: true,
+        output,
+      }));
       await agentToolResult(entry.requestId, entry.callId, true, output);
     } catch (err) {
       const message = `执行失败: ${String(err)}`;
       updateTool(entry.callId, (t) => ({
         ...t,
         status: "error",
+        collapsed: true,
         output: message,
       }));
       // 执行失败也如实回传，让模型有机会调整策略
@@ -417,7 +460,11 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   };
 
   const rejectTool = async (entry: ToolEntry) => {
-    updateTool(entry.callId, (t) => ({ ...t, status: "rejected" }));
+    updateTool(entry.callId, (t) => ({
+      ...t,
+      status: "rejected",
+      collapsed: true,
+    }));
     await agentToolResult(entry.requestId, entry.callId, false, "");
   };
 
@@ -578,37 +625,67 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
                   {e.content}
                 </div>
               ) : (
-                <div key={e.id} className={`agent-tool ${e.status}`}>
-                  <div className="agent-tool-head">
-                    <span className="agent-tool-title">
+                <div
+                  key={e.id}
+                  className={`agent-tool ${e.status}${e.collapsed ? " collapsed" : ""}`}
+                >
+                  <div
+                    className="agent-tool-summary"
+                    onClick={
+                      e.status === "pending"
+                        ? undefined
+                        : () => toggleTool(e.callId)
+                    }
+                  >
+                    {e.status === "pending" ? (
                       <Terminal size={12} strokeWidth={2} />
-                      {e.tool}
-                    </span>
-                    <code>{e.command}</code>
-                  </div>
-                  {e.status === "pending" ? (
-                    <div className="agent-tool-actions">
-                      <button
-                        className="primary"
-                        disabled={!busy || !targetSession}
-                        onClick={() => approveTool(e)}
-                      >
-                        批准执行
-                      </button>
-                      <button disabled={!busy} onClick={() => rejectTool(e)}>
-                        拒绝
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="agent-tool-status">
+                    ) : (
+                      <ChevronRight
+                        size={12}
+                        strokeWidth={2}
+                        className={`agent-tool-chevron${e.collapsed ? "" : " open"}`}
+                      />
+                    )}
+                    <span className="agent-tool-title">{e.tool}</span>
+                    <code className="agent-tool-brief">{e.command}</code>
+                    <span className="agent-tool-status">
                       {TOOL_STATUS_LABEL[e.status]}
-                    </div>
-                  )}
-                  {e.output && (
-                    <pre className="agent-tool-output">{e.output}</pre>
+                    </span>
+                  </div>
+                  {!e.collapsed && (
+                    <>
+                      <code className="agent-tool-command">{e.command}</code>
+                      {e.status === "pending" ? (
+                        <div className="agent-tool-actions">
+                          <button
+                            className="primary"
+                            disabled={!busy || !targetSession}
+                            onClick={() => approveTool(e)}
+                          >
+                            批准执行
+                          </button>
+                          <button
+                            disabled={!busy}
+                            onClick={() => rejectTool(e)}
+                          >
+                            拒绝
+                          </button>
+                        </div>
+                      ) : (
+                        e.output && (
+                          <pre className="agent-tool-output">{e.output}</pre>
+                        )
+                      )}
+                    </>
                   )}
                 </div>
               )
+            )}
+            {thinking && (
+              <div className="agent-thinking">
+                <LoaderCircle size={13} strokeWidth={2} />
+                思考中…
+              </div>
             )}
           </div>
 

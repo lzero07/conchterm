@@ -54,8 +54,15 @@ function normalizeEntries(parsed: unknown): AgentEntry[] {
     })
     .filter((e): e is AgentEntry => e !== null)
     .map((e) =>
-      e.kind === "tool" && (e.status === "pending" || e.status === "running")
-        ? { ...e, status: "timeout" as const }
+      e.kind === "tool"
+        ? {
+            ...e,
+            status:
+              e.status === "pending" || e.status === "running"
+                ? ("timeout" as const)
+                : e.status,
+            collapsed: true,
+          }
         : e
     );
 }

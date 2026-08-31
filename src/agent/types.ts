@@ -59,6 +59,8 @@ export interface ToolEntry {
   tool: string;
   command: string;
   status: ToolStatus;
+  /** 默认收起；待确认的卡片保持展开 */
+  collapsed: boolean;
   output?: string;
 }
 
