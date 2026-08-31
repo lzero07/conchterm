@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowUp,
   Bot,
-  ChevronRight,
+  ChevronDown,
   Eraser,
+  History,
   LoaderCircle,
-  MessageSquarePlus,
   MessageSquare,
   Pencil,
   Plus,
-  Send,
   Square,
   Terminal,
   Trash2,
@@ -24,19 +24,19 @@ import {
   agentToolResult,
 } from "./api";
 import {
-  loadActiveProviderId,
   deleteSessionEntries,
   DEFAULT_SESSION_TITLE,
+  loadActiveProviderId,
   loadMode,
+  loadProviders,
   loadSessionEntries,
   loadSessionIndex,
-  loadProviders,
+  newSessionMeta,
   saveActiveProviderId,
   saveMode,
   saveProviders,
   saveSessionEntries,
   saveSessionIndex,
-  newSessionMeta,
 } from "./storage";
 import type { AgentSessionIndex } from "./storage";
 import type {
@@ -69,6 +69,8 @@ interface Props {
   activeTerminalId: string | null;
 }
 
+type MenuKind = "history" | "mode" | "provider" | "session";
+
 const SYSTEM_PROMPT =
   "你是 ConchTerm SSH 终端内置的 AI 助手，回答简洁直接，优先给出可执行的命令或步骤。";
 
@@ -86,7 +88,13 @@ const TOOL_STATUS_LABEL: Record<ToolStatus, string> = {
   timeout: "确认超时",
 };
 
-/** AI 助手侧栏面板：问答 / Agent 双模式，流式聊天与命令确认 */
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** AI 助手面板：会话管理 / 问答与 Agent 双模式 / 流式聊天 / 命令确认 */
 export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   const [providers, setProviders] = useState<AgentProvider[]>(loadProviders);
   const [activeId, setActiveId] = useState<string>(loadActiveProviderId);
@@ -103,6 +111,7 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   const [editing, setEditing] = useState<AgentProvider | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
+  const [openMenu, setOpenMenu] = useState<MenuKind | null>(null);
   const activeStreamRef = useRef<ActiveStream | null>(null);
   const msgsRef = useRef<HTMLDivElement | null>(null);
 
@@ -127,6 +136,9 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     providers.find((p) => p.id === activeId) ?? providers[0] ?? null;
   const targetSession = sessions.find((s) => s.id === targetSessionId) ?? null;
   const activeSessionId = sessionIndex.activeId;
+  const activeMeta = sessionIndex.sessions.find(
+    (s) => s.id === activeSessionId
+  );
   const sortedSessions = [...sessionIndex.sessions].sort(
     (a, b) => b.updatedAt - a.updatedAt
   );
@@ -297,9 +309,6 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     setEntries(history);
 
     // 首条消息生成会话标题；每次发言刷新活跃时间
-    const activeMeta = sessionIndex.sessions.find(
-      (s) => s.id === activeSessionId
-    );
     if (activeMeta) {
       const title =
         activeMeta.title === DEFAULT_SESSION_TITLE
@@ -375,6 +384,11 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     setEntries([]);
   };
 
+  const switchMode = (next: AgentMode) => {
+    setMode(next);
+    saveMode(next);
+  };
+
   const switchSession = (id: string) => {
     if (id === activeSessionId) return;
     // 流式进行中切换会把增量写进错误会话，先取消
@@ -386,10 +400,10 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
 
   const createSession = () => {
     // 没发送过消息的空会话直接复用，不重复新建
-    const activeMeta = sessionIndex.sessions.find(
-      (s) => s.id === activeSessionId
-    );
-    if (activeMeta?.title === DEFAULT_SESSION_TITLE && entries.length === 0) {
+    if (
+      activeMeta?.title === DEFAULT_SESSION_TITLE &&
+      entries.length === 0
+    ) {
       return;
     }
     const emptySession = sessionIndex.sessions.find(
@@ -411,9 +425,8 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   };
 
   const startRename = () => {
-    const meta = sessionIndex.sessions.find((s) => s.id === activeSessionId);
-    if (!meta) return;
-    setRenameValue(meta.title);
+    if (!activeMeta) return;
+    setRenameValue(activeMeta.title);
     setRenaming(true);
   };
 
@@ -452,11 +465,6 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     const next: AgentSessionIndex = { sessions: rest, activeId: nextActive };
     setSessionIndex(next);
     saveSessionIndex(next);
-  };
-
-  const switchMode = (next: AgentMode) => {
-    setMode(next);
-    saveMode(next);
   };
 
   const approveTool = async (entry: ToolEntry) => {
@@ -537,288 +545,354 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     setFormOpen(false);
   };
 
+  const canSend =
+    !!input.trim() && !!activeProvider && (mode === "chat" || !!targetSession);
+
   return (
     <div className="panel agent-panel">
-      <div className="panel-header">
-        <span>AI 助手</span>
-        <span className="panel-header-actions">
+      {openMenu && (
+        <div className="agent-menu-backdrop" onClick={() => setOpenMenu(null)} />
+      )}
+
+      {/* 顶栏：会话标题 + 会话操作 */}
+      <div className="agent-topbar">
+        {renaming ? (
+          <input
+            className="agent-topbar-input"
+            value={renameValue}
+            autoFocus
+            maxLength={30}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") confirmRename();
+              if (e.key === "Escape") setRenaming(false);
+            }}
+            onBlur={confirmRename}
+          />
+        ) : (
+          <span className="agent-topbar-title" title={activeMeta?.title}>
+            {activeMeta?.title ?? "新对话"}
+          </span>
+        )}
+        <div className="agent-topbar-actions">
+          <button className="icon-btn" title="新建会话" onClick={createSession}>
+            <Plus size={14} strokeWidth={1.8} />
+          </button>
           <button
-            className="icon-btn"
-            title="清空当前会话"
-            onClick={clearChat}
+            className={`icon-btn${openMenu === "history" ? " active" : ""}`}
+            title="历史会话"
+            onClick={() =>
+              setOpenMenu(openMenu === "history" ? null : "history")
+            }
           >
+            <History size={14} strokeWidth={1.8} />
+          </button>
+          <button className="icon-btn" title="重命名" onClick={startRename}>
+            <Pencil size={13} strokeWidth={1.8} />
+          </button>
+          <button className="icon-btn" title="清空当前会话" onClick={clearChat}>
             <Eraser size={13} strokeWidth={1.8} />
           </button>
           <button
-            className="icon-btn"
-            title="添加 Provider"
-            onClick={() => {
-              setEditing(null);
-              setFormOpen(true);
-            }}
+            className="icon-btn danger"
+            title="删除会话"
+            onClick={() => activeSessionId && removeSession(activeSessionId)}
           >
-            <Plus size={15} strokeWidth={2} />
-          </button>
-        </span>
-      </div>
-
-      {providers.length === 0 ? (
-        <div className="empty-state agent-empty">
-          <span className="empty-icon">
-            <Bot size={26} strokeWidth={1.5} />
-          </span>
-          <p>还没有 AI Provider</p>
-          <span>支持 OpenAI 兼容接口与 Anthropic</span>
-          <button
-            className="primary"
-            onClick={() => {
-              setEditing(null);
-              setFormOpen(true);
-            }}
-          >
-            添加 Provider
+            <Trash2 size={13} strokeWidth={1.8} />
           </button>
         </div>
-      ) : (
-        <>
-          <div className="agent-provider-bar">
-            <select
-              value={activeProvider?.id ?? ""}
-              onChange={(e) => changeProvider(e.target.value)}
-            >
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                  {p.hasKey ? "" : "（未配置 Key）"}
-                </option>
-              ))}
-            </select>
-            <button
-              className="icon-btn"
-              title="编辑"
-              onClick={() => {
-                setEditing(activeProvider);
-                setFormOpen(true);
-              }}
-            >
-              <Pencil size={13} strokeWidth={1.8} />
-            </button>
-            <button
-              className="icon-btn danger"
-              title="删除"
-              onClick={() => activeProvider && removeProvider(activeProvider)}
-            >
-              <Trash2 size={13} strokeWidth={1.8} />
-            </button>
-          </div>
-
-          <div className="agent-session-bar">
-            {renaming ? (
-              <input
-                className="agent-session-input"
-                value={renameValue}
-                autoFocus
-                maxLength={30}
-                title="会话名称（Enter 保存，Esc 取消）"
-                onChange={(e) => setRenameValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") confirmRename();
-                  if (e.key === "Escape") setRenaming(false);
+        {openMenu === "history" && (
+          <div className="agent-menu agent-menu-history">
+            {sortedSessions.map((s) => (
+              <div
+                key={s.id}
+                className={`agent-menu-item${
+                  s.id === activeSessionId ? " active" : ""
+                }`}
+                onClick={() => {
+                  switchSession(s.id);
+                  setOpenMenu(null);
                 }}
-                onBlur={confirmRename}
-              />
-            ) : (
-              <select
-                value={activeSessionId}
-                title="历史会话"
-                onChange={(e) => switchSession(e.target.value)}
               >
-                {sortedSessions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.title}
-                  </option>
-                ))}
-              </select>
-            )}
-            <button
-              className="icon-btn"
-              title="新建会话"
-              onClick={createSession}
-            >
-              <MessageSquarePlus size={13} strokeWidth={1.8} />
-            </button>
-            <button
-              className="icon-btn"
-              title="重命名会话"
-              onClick={startRename}
-            >
-              <Pencil size={13} strokeWidth={1.8} />
-            </button>
-            <button
-              className="icon-btn danger"
-              title="删除当前会话"
-              onClick={() => activeSessionId && removeSession(activeSessionId)}
-            >
-              <Trash2 size={13} strokeWidth={1.8} />
-            </button>
+                <span className="grow">{s.title}</span>
+                <span className="agent-menu-time">
+                  {formatTime(s.updatedAt)}
+                </span>
+              </div>
+            ))}
           </div>
+        )}
+      </div>
 
-          <div className="agent-msgs" ref={msgsRef}>
-            {entries.map((e) =>
-              e.kind === "message" ? (
-                <div
-                  key={e.id}
-                  className={`agent-msg ${e.role}${e.error ? " error" : ""}`}
-                >
-                  {e.content}
-                </div>
-              ) : (
-                <div
-                  key={e.id}
-                  className={`agent-tool ${e.status}${e.collapsed ? " collapsed" : ""}`}
-                >
-                  <div
-                    className="agent-tool-summary"
-                    onClick={
-                      e.status === "pending"
-                        ? undefined
-                        : () => toggleTool(e.callId)
-                    }
-                  >
-                    {e.status === "pending" ? (
-                      <Terminal size={12} strokeWidth={2} />
-                    ) : (
-                      <ChevronRight
-                        size={12}
-                        strokeWidth={2}
-                        className={`agent-tool-chevron${e.collapsed ? "" : " open"}`}
-                      />
-                    )}
-                    <span className="agent-tool-title">{e.tool}</span>
-                    <code className="agent-tool-brief">{e.command}</code>
-                    <span className="agent-tool-status">
-                      {TOOL_STATUS_LABEL[e.status]}
-                    </span>
-                  </div>
-                  {!e.collapsed && (
-                    <>
-                      <code className="agent-tool-command">{e.command}</code>
-                      {e.status === "pending" ? (
-                        <div className="agent-tool-actions">
-                          <button
-                            className="primary"
-                            disabled={!busy || !targetSession}
-                            onClick={() => approveTool(e)}
-                          >
-                            批准执行
-                          </button>
-                          <button
-                            disabled={!busy}
-                            onClick={() => rejectTool(e)}
-                          >
-                            拒绝
-                          </button>
-                        </div>
-                      ) : (
-                        e.output && (
-                          <pre className="agent-tool-output">{e.output}</pre>
-                        )
-                      )}
-                    </>
+      {/* 消息区 */}
+      <div className="agent-msgs" ref={msgsRef}>
+        {entries.map((e) =>
+          e.kind === "message" ? (
+            <div
+              key={e.id}
+              className={`agent-msg ${e.role}${e.error ? " error" : ""}`}
+            >
+              {e.content}
+            </div>
+          ) : (
+            <div
+              key={e.id}
+              className={`agent-tool ${e.status}${e.collapsed ? " collapsed" : ""}`}
+            >
+              <div
+                className="agent-tool-summary"
+                onClick={
+                  e.status === "pending"
+                    ? undefined
+                    : () => toggleTool(e.callId)
+                }
+              >
+                {e.status === "pending" ? (
+                  <Terminal size={12} strokeWidth={2} />
+                ) : (
+                  <ChevronDown
+                    size={12}
+                    strokeWidth={2}
+                    className={`agent-tool-chevron${e.collapsed ? "" : " open"}`}
+                  />
+                )}
+                <span className="agent-tool-title">{e.tool}</span>
+                <code className="agent-tool-brief">{e.command}</code>
+                <span className="agent-tool-status">
+                  {TOOL_STATUS_LABEL[e.status]}
+                </span>
+              </div>
+              {!e.collapsed && (
+                <>
+                  <code className="agent-tool-command">{e.command}</code>
+                  {e.status === "pending" ? (
+                    <div className="agent-tool-actions">
+                      <button
+                        className="primary"
+                        disabled={!busy || !targetSession}
+                        onClick={() => approveTool(e)}
+                      >
+                        批准执行
+                      </button>
+                      <button
+                        disabled={!busy}
+                        onClick={() => rejectTool(e)}
+                      >
+                        拒绝
+                      </button>
+                    </div>
+                  ) : (
+                    e.output && (
+                      <pre className="agent-tool-output">{e.output}</pre>
+                    )
                   )}
-                </div>
-              )
+                </>
+              )}
+            </div>
+          )
+        )}
+        {thinking && (
+          <div className="agent-thinking">
+            <LoaderCircle size={13} strokeWidth={2} />
+            思考中…
+          </div>
+        )}
+        {entries.length === 0 && !busy && (
+          <div className="agent-welcome">
+            <Bot size={40} strokeWidth={1.3} />
+            <p>
+              {mode === "agent"
+                ? "描述你想做的事，我来帮你执行"
+                : "问问任何问题"}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* 底部输入合成区 */}
+      <div className="agent-composer">
+        <div className="agent-composer-row">
+          <button
+            className="agent-chip"
+            title="切换模式"
+            onClick={() => setOpenMenu(openMenu === "mode" ? null : "mode")}
+          >
+            {mode === "agent" ? (
+              <Terminal size={12} strokeWidth={2} />
+            ) : (
+              <MessageSquare size={12} strokeWidth={2} />
             )}
-            {thinking && (
-              <div className="agent-thinking">
-                <LoaderCircle size={13} strokeWidth={2} />
-                思考中…
+            <span>{mode === "agent" ? "Agent · 命令" : "Ask · 问答"}</span>
+            <ChevronDown size={11} strokeWidth={2} />
+            {openMenu === "mode" && (
+              <div className="agent-menu">
+                <div
+                  className={`agent-menu-item${mode === "chat" ? " active" : ""}`}
+                  onClick={() => {
+                    switchMode("chat");
+                    setOpenMenu(null);
+                  }}
+                >
+                  <MessageSquare size={12} strokeWidth={2} />
+                  <span>Ask · 问答</span>
+                  <span className="agent-menu-sub">仅对话</span>
+                </div>
+                <div
+                  className={`agent-menu-item${mode === "agent" ? " active" : ""}`}
+                  onClick={() => {
+                    switchMode("agent");
+                    setOpenMenu(null);
+                  }}
+                >
+                  <Terminal size={12} strokeWidth={2} />
+                  <span>Agent · 命令</span>
+                  <span className="agent-menu-sub">执行前需确认</span>
+                </div>
               </div>
             )}
-          </div>
-
-          <div className="agent-controls">
-            <div className="agent-modes">
-              <button
-                className={mode === "chat" ? "active" : ""}
-                title="问答模式：仅对话，不执行命令"
-                onClick={() => switchMode("chat")}
-              >
-                <MessageSquare size={12} strokeWidth={2} />
-                问答
-              </button>
-              <button
-                className={mode === "agent" ? "active" : ""}
-                title="Agent 模式：将自然语言转为命令，经确认后执行"
-                onClick={() => switchMode("agent")}
-              >
-                <Terminal size={12} strokeWidth={2} />
-                Agent
-              </button>
-            </div>
-            {mode === "agent" && sessions.length > 0 && (
-              <select
-                className="agent-session-select"
-                value={targetSessionId}
-                title="选择命令执行的目标会话"
-                onChange={(e) => setTargetSessionId(e.target.value)}
-              >
-                {sessions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.title}
-                  </option>
-                ))}
-              </select>
-            )}
-            {mode === "agent" && sessions.length === 0 && (
-              <span className="agent-session-hint">
-                先连接服务器才能执行命令
-              </span>
-            )}
-          </div>
-
-          <div className="agent-input">
-            <textarea
-              rows={2}
-              value={input}
-              placeholder={
-                mode === "agent"
-                  ? "描述你想做的事，Agent 会转化为命令（执行前需确认）…"
-                  : "问点什么…（Enter 发送，Shift+Enter 换行）"
+          </button>
+          {mode === "agent" && sessions.length > 0 && (
+            <button
+              className="agent-chip"
+              title="选择命令执行的目标会话"
+              onClick={() =>
+                setOpenMenu(openMenu === "session" ? null : "session")
               }
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (
-                  e.key === "Enter" &&
-                  !e.shiftKey &&
-                  !e.nativeEvent.isComposing
-                ) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-            />
-            {busy ? (
-              <button className="agent-stop" title="停止生成" onClick={stop}>
-                <Square size={13} strokeWidth={2} />
-              </button>
-            ) : (
-              <button
-                className="agent-send"
-                title="发送"
-                disabled={
-                  !input.trim() ||
-                  !activeProvider ||
-                  (mode === "agent" && !targetSession)
-                }
-                onClick={send}
-              >
-                <Send size={14} strokeWidth={2} />
-              </button>
+            >
+              <Terminal size={12} strokeWidth={2} />
+              <span>{targetSession?.title ?? "选择会话"}</span>
+              <ChevronDown size={11} strokeWidth={2} />
+              {openMenu === "session" && (
+                <div className="agent-menu">
+                  {sessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className={`agent-menu-item${
+                        s.id === targetSessionId ? " active" : ""
+                      }`}
+                      onClick={() => {
+                        setTargetSessionId(s.id);
+                        setOpenMenu(null);
+                      }}
+                    >
+                      <Terminal size={12} strokeWidth={2} />
+                      <span className="grow">{s.title}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </button>
+          )}
+          <span className="spacer" />
+          <button
+            className="agent-chip"
+            title="切换 / 管理 AI Provider"
+            onClick={() =>
+              setOpenMenu(openMenu === "provider" ? null : "provider")
+            }
+          >
+            <Bot size={12} strokeWidth={2} />
+            <span>{activeProvider?.name ?? "选择模型"}</span>
+            <ChevronDown size={11} strokeWidth={2} />
+            {openMenu === "provider" && (
+              <div className="agent-menu right">
+                {providers.map((p) => (
+                  <div
+                    key={p.id}
+                    className={`agent-menu-item${
+                      p.id === activeProvider?.id ? " active" : ""
+                    }`}
+                    onClick={() => {
+                      changeProvider(p.id);
+                      setOpenMenu(null);
+                    }}
+                  >
+                    <Bot size={12} strokeWidth={2} />
+                    <span className="grow">
+                      {p.name}
+                      {!p.hasKey && (
+                        <span className="agent-menu-warn">未配置 Key</span>
+                      )}
+                    </span>
+                    <span className="agent-menu-actions">
+                      <button
+                        title="编辑"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditing(p);
+                          setFormOpen(true);
+                          setOpenMenu(null);
+                        }}
+                      >
+                        <Pencil size={11} strokeWidth={1.8} />
+                      </button>
+                      <button
+                        title="删除"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeProvider(p);
+                        }}
+                      >
+                        <Trash2 size={11} strokeWidth={1.8} />
+                      </button>
+                    </span>
+                  </div>
+                ))}
+                <div
+                  className="agent-menu-item add"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditing(null);
+                    setFormOpen(true);
+                    setOpenMenu(null);
+                  }}
+                >
+                  <Plus size={12} strokeWidth={2} />
+                  添加 Provider
+                </div>
+              </div>
             )}
-          </div>
-        </>
-      )}
+          </button>
+        </div>
+        <textarea
+          className="agent-composer-input"
+          rows={2}
+          value={input}
+          placeholder={
+            mode === "agent"
+              ? "描述你想做的事，Agent 将转化为命令执行（执行前需确认）…"
+              : "问任何问题…（Enter 发送，Shift+Enter 换行）"
+          }
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (
+              e.key === "Enter" &&
+              !e.shiftKey &&
+              !e.nativeEvent.isComposing
+            ) {
+              e.preventDefault();
+              send();
+            }
+          }}
+        />
+        <div className="agent-composer-row">
+          <span className="agent-hint">
+            {mode === "agent" ? "命令执行前需确认" : ""}
+          </span>
+          <span className="spacer" />
+          <button
+            className={`agent-send-circle${busy || canSend ? " ready" : ""}`}
+            title={busy ? "停止生成" : "发送"}
+            disabled={!busy && !canSend}
+            onClick={busy ? stop : send}
+          >
+            {busy ? (
+              <Square size={12} strokeWidth={2} />
+            ) : (
+              <ArrowUp size={16} strokeWidth={2} />
+            )}
+          </button>
+        </div>
+      </div>
 
       {formOpen && (
         <ProviderForm
