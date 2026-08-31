@@ -12,12 +12,31 @@ import {
 interface Props {
   sessionKey: string;
   params: ConnectParams;
+  appearance: TerminalAppearance;
   onStatus?: (status: "connected" | "failed") => void;
+}
+
+export interface TerminalAppearance {
+  fontFamily: string;
+  theme: "light" | "dark";
+  accent: string;
+  selection: string;
 }
 
 // 每个会话键的连接代数：清理时仅当仍是最新一代才真正断开，
 // 避免 StrictMode 双挂载时旧的异步断开跑在新连接之后、把新会话杀掉
 const disconnectGenerators = new Map<string, number>();
+
+function termTheme(appearance: TerminalAppearance) {
+  const light = appearance.theme === "light";
+  return {
+    background: light ? "#ffffff" : "#16171b",
+    foreground: light ? "#24262c" : "#d6d9e0",
+    cursor: appearance.accent,
+    cursorAccent: light ? "#ffffff" : "#16171b",
+    selectionBackground: appearance.selection,
+  };
+}
 
 function charWidth(code: number): number {
   // CJK 表意文字、假名、谚文及全角形式按 2 列；制表符/✓ 等歧义宽度字符按 1 列
@@ -63,26 +82,42 @@ function padEnd(s: string, w: number): string {
  * 单个 SSH 终端：挂载即连接，xterm 输出接 Tauri ipc Channel
  * 注意：卸载时断开远端会话
  */
-export default function TerminalView({ sessionKey, params, onStatus }: Props) {
+export default function TerminalView({
+  sessionKey,
+  params,
+  appearance,
+  onStatus,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+
+  // 设置面板里改字体/主题时，原地更新已存在的终端实例
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontFamily = appearance.fontFamily;
+    term.options.theme = termTheme(appearance);
+    try {
+      fitRef.current?.fit();
+    } catch {
+      // 容器尺寸为 0 时忽略
+    }
+  }, [appearance]);
 
   useEffect(() => {
     if (!containerRef.current) return;
 
     const term = new Terminal({
-      fontFamily: "Consolas, 'Courier New', monospace",
+      fontFamily: appearance.fontFamily,
       fontSize: 14,
       cursorBlink: true,
       scrollback: 5000,
-      theme: {
-        background: "#16171b",
-        foreground: "#d6d9e0",
-        cursor: "#4f8cff",
-        cursorAccent: "#16171b",
-        selectionBackground: "rgba(79, 140, 255, 0.30)",
-      },
+      theme: termTheme(appearance),
     });
     const fit = new FitAddon();
+    termRef.current = term;
+    fitRef.current = fit;
     term.loadAddon(fit);
     term.open(containerRef.current);
 
@@ -179,6 +214,8 @@ export default function TerminalView({ sessionKey, params, onStatus }: Props) {
         }
       );
       term.dispose();
+      termRef.current = null;
+      fitRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);

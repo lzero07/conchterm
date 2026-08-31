@@ -1,6 +1,7 @@
 mod agent_bridge;
 mod drag_out;
 mod ssh;
+mod tray;
 
 use ssh::{SessionMap, SshSession};
 use std::collections::HashMap;
@@ -13,6 +14,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            tray::init(app)?;
+            Ok(())
+        })
         .manage(SessionMap(Mutex::new(
             HashMap::<String, Arc<SshSession>>::new(),
         )))
@@ -32,6 +37,7 @@ pub fn run() {
             ssh::sftp_exists,
             drag_out::prepare_file_drag,
             drag_out::start_file_drag,
+            tray::set_tray_visible,
             agent_bridge::agent_chat,
             agent_bridge::agent_tool_result,
             agent_bridge::agent_cancel,

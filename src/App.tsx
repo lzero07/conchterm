@@ -6,6 +6,7 @@ import {
   Minus,
   Pencil,
   Plus,
+  Settings as SettingsIcon,
   Server,
   Square,
   Terminal,
@@ -13,10 +14,22 @@ import {
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { invoke } from "@tauri-apps/api/core";
 import TerminalView from "./components/TerminalView";
 import ServerForm from "./components/ServerForm";
 import FileBrowser from "./components/FileBrowser";
+import SettingsView from "./components/SettingsView";
 import AgentPanel from "./agent/AgentPanel";
+import {
+  applyAppearance,
+  applyZoom,
+  COLOR_THEMES,
+  loadSettings,
+  resolveTheme,
+  saveSettings,
+  TERMINAL_FONTS,
+  type AppSettings,
+} from "./settings";
 import {
   loadServers,
   saveServers,
@@ -36,6 +49,13 @@ type SidebarTab = "servers" | "files";
 
 type SessionStatus = "connected" | "failed";
 
+interface TerminalAppearance {
+  fontFamily: string;
+  theme: "light" | "dark";
+  accent: string;
+  selection: string;
+}
+
 const DEFAULT_SIDEBAR_WIDTH = 272;
 const SIDEBAR_STORAGE_KEY = "sidebarWidth";
 const DEFAULT_AGENT_DOCK_WIDTH = 360;
@@ -44,6 +64,8 @@ const AGENT_DOCK_OPEN_KEY = "agentDockOpen";
 
 export default function App() {
   const [servers, setServers] = useState<ServerProfile[]>(loadServers);
+  const [settings, setSettings] = useState<AppSettings>(loadSettings);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("servers");
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ServerProfile | null>(null);
@@ -84,6 +106,47 @@ export default function App() {
     win.isMaximized().then(setIsMaximized).catch(() => {});
     return () => unlisten?.();
   }, []);
+
+  // 外观设置：主题 / 强调色 / 圆角 / 界面字体
+  useEffect(() => {
+    applyAppearance(settings);
+  }, [settings]);
+
+  // 跟随系统时监听系统主题切换
+  useEffect(() => {
+    if (settings.themeMode !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => applyAppearance(settings);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [settings]);
+
+  // 界面缩放走 WebView 原生缩放
+  useEffect(() => {
+    void applyZoom(settings.zoom);
+  }, [settings.zoom]);
+
+  // 托盘图标开关（Rust 端常驻托盘实例，这里只切换可见性）
+  useEffect(() => {
+    invoke("set_tray_visible", { visible: settings.trayIcon }).catch(() => {});
+  }, [settings.trayIcon]);
+
+  const terminalAppearance = useMemo<TerminalAppearance>(() => {
+    const theme = COLOR_THEMES[settings.colorTheme] ?? COLOR_THEMES.ocean;
+    return {
+      fontFamily:
+        TERMINAL_FONTS[settings.terminalFont]?.stack ??
+        TERMINAL_FONTS.consolas.stack,
+      theme: resolveTheme(settings.themeMode),
+      accent: theme.accent,
+      selection: theme.selection,
+    };
+  }, [settings.colorTheme, settings.themeMode, settings.terminalFont]);
+
+  const applySettings = (next: AppSettings) => {
+    setSettings(next);
+    saveSettings(next);
+  };
 
   // 文件面板跟随当前活跃终端的会话
   const activeSessionId = activeKey;
@@ -207,6 +270,7 @@ export default function App() {
           <TerminalView
             sessionKey={t.key}
             params={t.params}
+            appearance={terminalAppearance}
             onStatus={(status) =>
               setSessionStatus((prev) => ({ ...prev, [t.key]: status }))
             }
@@ -214,7 +278,7 @@ export default function App() {
         </div>
       )),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tabs.map((t) => t.key).join(","), activeKey]
+    [tabs.map((t) => t.key).join(","), activeKey, terminalAppearance]
   );
 
   return (
@@ -231,6 +295,13 @@ export default function App() {
           ConchTerm
         </span>
         <div className="title-actions">
+          <button
+            className={`title-ai${settingsOpen ? " active" : ""}`}
+            title="设置"
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            <SettingsIcon size={17} strokeWidth={2} />
+          </button>
           <button
             className={`title-ai${agentDockOpen ? " active" : ""}`}
             title="AI 助手"
@@ -381,39 +452,53 @@ export default function App() {
 
       {/* 右侧：终端标签页 */}
       <main className="main-area">
-        <div className="tab-bar">
-          {tabs.map((t) => (
-            <div
-              key={t.key}
-              className={`term-tab ${t.key === activeKey ? "active" : ""}`}
-              onClick={() => setActiveKey(t.key)}
-            >
-              <span>{t.title}</span>
-              <span
-                className="tab-close"
-                title="关闭标签页"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  closeTerminal(t.key);
-                }}
+        <div
+          className="main-normal"
+          style={{ display: settingsOpen ? "none" : "flex" }}
+        >
+          <div
+            className={`tab-bar${settings.tabOverflow === "wrap" ? " tab-wrap" : ""}`}
+          >
+            {tabs.map((t) => (
+              <div
+                key={t.key}
+                className={`term-tab ${t.key === activeKey ? "active" : ""}`}
+                onClick={() => setActiveKey(t.key)}
               >
-                <X size={13} strokeWidth={2} />
-              </span>
-            </div>
-          ))}
+                <span>{t.title}</span>
+                <span
+                  className="tab-close"
+                  title="关闭标签页"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeTerminal(t.key);
+                  }}
+                >
+                  <X size={13} strokeWidth={2} />
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="terminal-stack">
+            {terminalViews}
+            {tabs.length === 0 && (
+              <div className="empty-state welcome">
+                <span className="empty-icon">
+                  <Terminal size={30} strokeWidth={1.5} />
+                </span>
+                <p>欢迎使用 ConchTerm</p>
+                <span>从左侧选择一台服务器即可打开终端</span>
+              </div>
+            )}
+          </div>
         </div>
-        <div className="terminal-stack">
-          {terminalViews}
-          {tabs.length === 0 && (
-            <div className="empty-state welcome">
-              <span className="empty-icon">
-                <Terminal size={30} strokeWidth={1.5} />
-              </span>
-              <p>欢迎使用 ConchTerm</p>
-              <span>从左侧选择一台服务器即可打开终端</span>
-            </div>
-          )}
-        </div>
+        {settingsOpen && (
+          <SettingsView
+            settings={settings}
+            onApply={applySettings}
+            onClose={() => setSettingsOpen(false)}
+          />
+        )}
       </main>
 
       {/* AI 助手右侧面板 */}
