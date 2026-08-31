@@ -1,3 +1,4 @@
+mod agent_bridge;
 mod drag_out;
 mod ssh;
 
@@ -15,6 +16,7 @@ pub fn run() {
         .manage(SessionMap(Mutex::new(
             HashMap::<String, Arc<SshSession>>::new(),
         )))
+        .manage(agent_bridge::AgentState::default())
         .invoke_handler(tauri::generate_handler![
             ssh::ssh_connect,
             ssh::ssh_write,
@@ -28,7 +30,12 @@ pub fn run() {
             ssh::sftp_download,
             ssh::sftp_exists,
             drag_out::prepare_file_drag,
-            drag_out::start_file_drag
+            drag_out::start_file_drag,
+            agent_bridge::agent_chat,
+            agent_bridge::agent_cancel,
+            agent_bridge::agent_set_key,
+            agent_bridge::agent_delete_key,
+            agent_bridge::agent_has_key
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

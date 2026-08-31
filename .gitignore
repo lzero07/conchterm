@@ -5,6 +5,9 @@ dist/
 # Rust
 src-tauri/target/
 
+# Python
+__pycache__/
+
 # Editor
 .vscode/
 .idea/

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Bot,
   FolderOpen,
   Pencil,
   Plus,
@@ -11,6 +12,7 @@ import {
 import TerminalView from "./components/TerminalView";
 import ServerForm from "./components/ServerForm";
 import FileBrowser from "./components/FileBrowser";
+import AgentPanel from "./agent/AgentPanel";
 import {
   loadServers,
   saveServers,
@@ -26,7 +28,7 @@ interface TermTab {
   params: ConnectParams;
 }
 
-type SidebarTab = "servers" | "files";
+type SidebarTab = "servers" | "files" | "agent";
 
 type SessionStatus = "connected" | "failed";
 
@@ -164,6 +166,13 @@ export default function App() {
         >
           <FolderOpen size={19} strokeWidth={1.8} />
         </button>
+        <button
+          className={`act-btn ${sidebarTab === "agent" ? "active" : ""}`}
+          title="AI 助手"
+          onClick={() => setSidebarTab("agent")}
+        >
+          <Bot size={19} strokeWidth={1.8} />
+        </button>
       </nav>
 
       {/* 内容侧栏 */}
@@ -247,8 +256,10 @@ export default function App() {
               )}
             </ul>
           </div>
-        ) : (
+        ) : sidebarTab === "files" ? (
           <FileBrowser sessionId={activeSessionId} />
+        ) : (
+          <AgentPanel />
         )}
       </aside>
 
