@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <filter id="ds" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+  <!-- 窗口占画布 ~92%，边缘仅留 44px 呼吸位 -->
+  <g filter="url(#ds)">
+    <rect x="44" y="84" width="936" height="856" rx="88" fill="#262a33" stroke="#4a5265" stroke-width="7"/>
+  </g>
+  <circle cx="138" cy="178" r="29" fill="#f16a6a"/>
+  <circle cx="220" cy="178" r="29" fill="#f0b95a"/>
+  <circle cx="302" cy="178" r="29" fill="#3ecf8e"/>
+  <line x1="44" y1="245" x2="980" y2="245" stroke="#1b1e24" stroke-width="5"/>
+  <path d="M 170 398 L 311 533 L 170 669" fill="none" stroke="#4f8cff" stroke-width="66" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="390" y1="669" x2="671" y2="669" stroke="#3ecf8e" stroke-width="66" stroke-linecap="round"/>
+</svg>
