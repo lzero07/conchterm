@@ -304,6 +304,126 @@ pub async fn ssh_disconnect(
     Ok(())
 }
 
+// ==================== Agent 命令执行 ====================
+
+const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const EXEC_OUTPUT_LIMIT: usize = 16 * 1024;
+
+/// Agent 模式执行命令：独立 exec 通道执行并收集输出。
+/// 优先复用现有连接；部分服务器 MaxSessions=1 拒绝多开通道时，
+/// 与 SFTP 一样退回独立 TCP 连接执行。
+#[tauri::command]
+pub async fn ssh_exec(
+    session_id: String,
+    command: String,
+    sessions: State<'_, SessionMap>,
+) -> Result<String, String> {
+    let session = sessions
+        .0
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "会话不存在或已断开".to_string())?;
+
+    match exec_on_handle(&session.handle, command.clone()).await {
+        Ok(output) => Ok(output),
+        Err(reuse_err) => match connect_exec(&session.params, command).await {
+            Ok(output) => Ok(output),
+            Err(_) => Err(reuse_err),
+        },
+    }
+}
+
+/// 在现有连接上开 exec 通道执行
+async fn exec_on_handle(
+    handle: &Mutex<client::Handle<ClientHandler>>,
+    command: String,
+) -> Result<String, String> {
+    let channel = {
+        let guard = handle.lock().await;
+        guard
+            .channel_open_session()
+            .await
+            .map_err(|e| format!("打开执行通道失败: {e}"))?
+    };
+    run_exec_channel(channel, command).await
+}
+
+/// MaxSessions 受限时的独立 TCP 连接方案（与 connect_sftp 同思路）
+async fn connect_exec(params: &ConnectParams, command: String) -> Result<String, String> {
+    let mut handle = client::connect(
+        ssh_config(),
+        (params.host.as_str(), params.port),
+        ClientHandler,
+    )
+    .await
+    .map_err(|e| format!("连接失败: {e}"))?;
+    authenticate(&mut handle, params).await?;
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("打开执行通道失败: {e}"))?;
+    run_exec_channel(channel, command).await
+}
+
+/// 执行命令并收集 stdout/stderr，直到通道关闭；带超时与输出截断
+async fn run_exec_channel(
+    mut channel: russh::Channel<russh::client::Msg>,
+    command: String,
+) -> Result<String, String> {
+    channel
+        .exec(true, command)
+        .await
+        .map_err(|e| format!("执行命令失败: {e}"))?;
+
+    let collect = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut exit_code: Option<u32> = None;
+        loop {
+            match channel.wait().await {
+                Some(russh::ChannelMsg::Data { ref data }) => out.extend_from_slice(data),
+                Some(russh::ChannelMsg::ExtendedData { ref data, ext: 1 }) => {
+                    err.extend_from_slice(data)
+                }
+                Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                    exit_code = Some(exit_status)
+                }
+                Some(russh::ChannelMsg::Eof) => {}
+                Some(russh::ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+        (out, err, exit_code)
+    };
+
+    let (out, err, exit_code) = tokio::time::timeout(EXEC_TIMEOUT, collect)
+        .await
+        .map_err(|_| "命令执行超时（30 秒），已放弃".to_string())?;
+
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    let stderr_text = String::from_utf8_lossy(&err).into_owned();
+    if !stderr_text.is_empty() {
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&stderr_text);
+    }
+    if let Some(code) = exit_code {
+        text.push_str(&format!("\n[exit code: {code}]"));
+    }
+    if text.len() > EXEC_OUTPUT_LIMIT {
+        let mut cut = EXEC_OUTPUT_LIMIT;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n[输出已截断]");
+    }
+    Ok(text)
+}
+
 // ==================== SFTP ====================
 
 /// 封装 russh-sftp 的 SftpSession

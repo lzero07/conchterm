@@ -52,6 +52,14 @@ pub enum AgentEvent {
     Error { id: String, message: String },
     #[serde(rename = "ready")]
     Ready,
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        id: String,
+        #[serde(rename = "callId")]
+        call_id: String,
+        tool: String,
+        args: serde_json::Value,
+    },
 }
 
 impl AgentEvent {
@@ -59,7 +67,8 @@ impl AgentEvent {
         match self {
             AgentEvent::Delta { id, .. }
             | AgentEvent::Done { id }
-            | AgentEvent::Error { id, .. } => Some(id),
+            | AgentEvent::Error { id, .. }
+            | AgentEvent::ToolCall { id, .. } => Some(id),
             AgentEvent::Ready => None,
         }
     }
@@ -318,6 +327,7 @@ pub async fn agent_chat(
     state: State<'_, AgentState>,
     provider: AgentProviderInput,
     messages: Vec<AgentChatMessage>,
+    mode: Option<String>,
     on_delta: Channel<AgentEvent>,
 ) -> Result<String, String> {
     let api_key = read_api_key(&provider.id)?;
@@ -336,6 +346,7 @@ pub async fn agent_chat(
     let request = json!({
         "type": "chat",
         "id": request_id,
+        "mode": mode.unwrap_or_else(|| "chat".into()),
         "provider": {
             "protocol": provider.protocol,
             "base_url": provider.base_url,
@@ -377,6 +388,36 @@ pub async fn agent_chat(
     }
 
     Ok(request_id)
+}
+
+/// 前端把（已确认执行的）工具结果回传给 Python，唤醒 agent 循环
+#[tauri::command]
+pub fn agent_tool_result(
+    state: State<'_, AgentState>,
+    request_id: String,
+    call_id: String,
+    approved: bool,
+    output: String,
+) -> Result<(), String> {
+    let _ = request_id; // 路由由 callId 承担；保留参数用于将来按请求校验
+    let line = format!(
+        "{}\n",
+        json!({
+            "type": "tool_result",
+            "callId": call_id,
+            "approved": approved,
+            "output": output,
+        })
+    );
+    let mut guard = state.process.lock().unwrap();
+    match guard.as_mut() {
+        Some(p) => p
+            .stdin
+            .write_all(line.as_bytes())
+            .and_then(|_| p.stdin.flush())
+            .map_err(|e| format!("发送工具结果失败: {e}")),
+        None => Err("智能体进程未运行".into()),
+    }
 }
 
 #[tauri::command]

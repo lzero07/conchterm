@@ -259,7 +259,10 @@ export default function App() {
         ) : sidebarTab === "files" ? (
           <FileBrowser sessionId={activeSessionId} />
         ) : (
-          <AgentPanel />
+          <AgentPanel
+            sessions={tabs.map((t) => ({ id: t.key, title: t.title }))}
+            activeTerminalId={activeKey}
+          />
         )}
       </aside>
 

@@ -2,37 +2,51 @@ import { useEffect, useRef, useState } from "react";
 import {
   Bot,
   Eraser,
+  MessageSquarePlus,
+  MessageSquare,
   Pencil,
   Plus,
   Send,
   Square,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import ProviderForm from "./ProviderForm";
+import { sshExec } from "../api";
 import {
   agentCancel,
   agentChat,
   agentDeleteKey,
   agentHasKey,
   agentSetKey,
+  agentToolResult,
 } from "./api";
 import {
-  clearHistory,
   loadActiveProviderId,
-  loadHistory,
+  deleteSessionEntries,
+  DEFAULT_SESSION_TITLE,
+  loadMode,
+  loadSessionEntries,
+  loadSessionIndex,
   loadProviders,
   saveActiveProviderId,
-  saveHistory,
+  saveMode,
   saveProviders,
+  saveSessionEntries,
+  saveSessionIndex,
+  newSessionMeta,
 } from "./storage";
-import type { AgentChatMessage, AgentEvent, AgentProvider } from "./types";
-
-interface ChatEntry {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  error?: boolean;
-}
+import type { AgentSessionIndex } from "./storage";
+import type {
+  AgentChatMessage,
+  AgentEntry,
+  AgentEvent,
+  AgentMode,
+  AgentProvider,
+  MessageEntry,
+  ToolEntry,
+  ToolStatus,
+} from "./types";
 
 interface ActiveStream {
   entryId: string;
@@ -40,22 +54,44 @@ interface ActiveStream {
   cancelled: boolean;
 }
 
+export interface SessionInfo {
+  id: string;
+  title: string;
+}
+
+interface Props {
+  sessions: SessionInfo[];
+  activeTerminalId: string | null;
+}
+
 const SYSTEM_PROMPT =
   "你是 ConchTerm SSH 终端内置的 AI 助手，回答简洁直接，优先给出可执行的命令或步骤。";
 
-/** AI 助手侧栏面板：Provider 管理与流式聊天 */
-export default function AgentPanel() {
+const AGENT_PROMPT_EXTRA =
+  "\n你处于 Agent 模式，可以通过 run_command 工具在用户的 SSH 会话中执行命令。" +
+  "调用工具前先用一句话说明你要做什么；对 rm、重启服务等危险命令要说明后果。" +
+  "得到输出后基于结果给出总结。";
+
+const TOOL_STATUS_LABEL: Record<ToolStatus, string> = {
+  pending: "等待确认",
+  running: "执行中…",
+  approved: "已执行",
+  rejected: "已拒绝",
+  error: "执行失败",
+  timeout: "确认超时",
+};
+
+/** AI 助手侧栏面板：问答 / Agent 双模式，流式聊天与命令确认 */
+export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   const [providers, setProviders] = useState<AgentProvider[]>(loadProviders);
   const [activeId, setActiveId] = useState<string>(loadActiveProviderId);
-  const [entries, setEntries] = useState<ChatEntry[]>(() =>
-    loadHistory()
-      .filter((m) => m.role !== "system")
-      .map((m) => ({
-        ...m,
-        role: m.role as "user" | "assistant",
-        id: crypto.randomUUID(),
-      }))
+  const [mode, setMode] = useState<AgentMode>(loadMode);
+  const [sessionIndex, setSessionIndex] =
+    useState<AgentSessionIndex>(loadSessionIndex);
+  const [targetSessionId, setTargetSessionId] = useState<string>(
+    activeTerminalId ?? sessions[0]?.id ?? ""
   );
+  const [entries, setEntries] = useState<AgentEntry[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
@@ -65,6 +101,13 @@ export default function AgentPanel() {
 
   const activeProvider =
     providers.find((p) => p.id === activeId) ?? providers[0] ?? null;
+  const targetSession = sessions.find((s) => s.id === targetSessionId) ?? null;
+  const activeSessionId = sessionIndex.activeId;
+  const sortedSessions = [...sessionIndex.sessions].sort(
+    (a, b) => b.updatedAt - a.updatedAt
+  );
+  // 会话刚载入时跳过一次保存，避免用空数组覆盖已存记录
+  const skipSaveRef = useRef(true);
 
   // 启动时用系统凭据管理器的实际状态校准 hasKey 标记
   useEffect(() => {
@@ -91,16 +134,57 @@ export default function AgentPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 活跃终端变化时跟随切换目标会话
   useEffect(() => {
-    saveHistory(entries);
-  }, [entries]);
+    if (activeTerminalId) setTargetSessionId(activeTerminalId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTerminalId]);
+
+  // 没有任何会话时自动创建一个
+  useEffect(() => {
+    if (!sessionIndex.sessions.length) {
+      const meta = newSessionMeta();
+      const next: AgentSessionIndex = {
+        sessions: [meta],
+        activeId: meta.id,
+      };
+      setSessionIndex(next);
+      saveSessionIndex(next);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 切换会话时载入对应记录
+  useEffect(() => {
+    skipSaveRef.current = true;
+    setEntries(activeSessionId ? loadSessionEntries(activeSessionId) : []);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (skipSaveRef.current) {
+      skipSaveRef.current = false;
+      return;
+    }
+    if (activeSessionId) saveSessionEntries(activeSessionId, entries);
+  }, [entries, activeSessionId]);
 
   useEffect(() => {
     msgsRef.current?.scrollTo({ top: msgsRef.current.scrollHeight });
   }, [entries]);
 
-  const applyToEntry = (entryId: string, fn: (e: ChatEntry) => ChatEntry) => {
-    setEntries((prev) => prev.map((e) => (e.id === entryId ? fn(e) : e)));
+  const updateMessage = (
+    entryId: string,
+    fn: (e: MessageEntry) => MessageEntry
+  ) => {
+    setEntries((prev) =>
+      prev.map((e) => (e.id === entryId && e.kind === "message" ? fn(e) : e))
+    );
+  };
+
+  const updateTool = (callId: string, fn: (e: ToolEntry) => ToolEntry) => {
+    setEntries((prev) =>
+      prev.map((e) => (e.kind === "tool" && e.callId === callId ? fn(e) : e))
+    );
   };
 
   const finishStream = () => {
@@ -114,10 +198,28 @@ export default function AgentPanel() {
 
     if (event.type === "delta") {
       if (stream.cancelled) return;
-      applyToEntry(entryId, (e) => ({
+      updateMessage(entryId, (e) => ({
         ...e,
         content: e.content + (event.content ?? ""),
       }));
+      return;
+    }
+    if (event.type === "tool_call") {
+      if (stream.cancelled) return;
+      const command =
+        typeof event.args?.command === "string" ? event.args.command : "";
+      setEntries((prev) => [
+        ...prev,
+        {
+          kind: "tool",
+          id: crypto.randomUUID(),
+          callId: event.callId ?? "",
+          requestId: stream.requestId ?? "",
+          tool: event.tool ?? "",
+          command,
+          status: "pending",
+        },
+      ]);
       return;
     }
     if (event.type === "done") {
@@ -126,7 +228,7 @@ export default function AgentPanel() {
     }
     // error：空 id 表示进程级错误，否则是当前请求失败
     if (!event.id || event.id === stream.requestId) {
-      applyToEntry(entryId, (e) => ({
+      updateMessage(entryId, (e) => ({
         ...e,
         content: e.content || event.message || "未知错误",
         error: true,
@@ -138,20 +240,43 @@ export default function AgentPanel() {
   const send = async () => {
     const provider = activeProvider;
     const text = input.trim();
-    if (!provider || !text || busy) return;
+    if (!provider || !text || busy || !activeSessionId) return;
+    if (mode === "agent" && !targetSession) return;
 
-    const userEntry: ChatEntry = {
+    const userEntry: MessageEntry = {
+      kind: "message",
       id: crypto.randomUUID(),
       role: "user",
       content: text,
     };
-    const assistantEntry: ChatEntry = {
+    const assistantEntry: MessageEntry = {
+      kind: "message",
       id: crypto.randomUUID(),
       role: "assistant",
       content: "",
     };
     const history = [...entries, userEntry, assistantEntry];
     setEntries(history);
+
+    // 首条消息生成会话标题；每次发言刷新活跃时间
+    const activeMeta = sessionIndex.sessions.find(
+      (s) => s.id === activeSessionId
+    );
+    if (activeMeta) {
+      const title =
+        activeMeta.title === DEFAULT_SESSION_TITLE
+          ? text.slice(0, 20)
+          : activeMeta.title;
+      const nextIndex: AgentSessionIndex = {
+        sessions: sessionIndex.sessions.map((s) =>
+          s.id === activeMeta.id ? { ...s, title, updatedAt: Date.now() } : s
+        ),
+        activeId: activeSessionId,
+      };
+      setSessionIndex(nextIndex);
+      saveSessionIndex(nextIndex);
+    }
+
     setInput("");
     setBusy(true);
     activeStreamRef.current = {
@@ -160,16 +285,25 @@ export default function AgentPanel() {
       cancelled: false,
     };
 
-    // 空内容的占位/已取消条目不进入上下文
+    // 上下文只带消息条目；空内容的占位/已取消条目不进入
     const payload: AgentChatMessage[] = [
-      { role: "system", content: SYSTEM_PROMPT },
+      {
+        role: "system",
+        content:
+          mode === "agent" ? SYSTEM_PROMPT + AGENT_PROMPT_EXTRA : SYSTEM_PROMPT,
+      },
       ...history
-        .filter((e) => e.id !== assistantEntry.id && e.content.trim())
+        .filter(
+          (e): e is MessageEntry =>
+            e.kind === "message" &&
+            e.id !== assistantEntry.id &&
+            e.content.trim() !== ""
+        )
         .map((e) => ({ role: e.role, content: e.content })),
     ];
 
     try {
-      const requestId = await agentChat(provider, payload, (event) =>
+      const requestId = await agentChat(provider, payload, mode, (event) =>
         handleEvent(event, assistantEntry.id)
       );
       if (activeStreamRef.current?.entryId === assistantEntry.id) {
@@ -179,7 +313,7 @@ export default function AgentPanel() {
         agentCancel(requestId).catch(() => {});
       }
     } catch (err) {
-      applyToEntry(assistantEntry.id, (e) => ({
+      updateMessage(assistantEntry.id, (e) => ({
         ...e,
         content: e.content || String(err),
         error: true,
@@ -200,7 +334,91 @@ export default function AgentPanel() {
   const clearChat = () => {
     stop();
     setEntries([]);
-    clearHistory();
+  };
+
+  const switchSession = (id: string) => {
+    if (id === activeSessionId) return;
+    // 流式进行中切换会把增量写进错误会话，先取消
+    stop();
+    const next: AgentSessionIndex = { ...sessionIndex, activeId: id };
+    setSessionIndex(next);
+    saveSessionIndex(next);
+  };
+
+  const createSession = () => {
+    // 没发送过消息的空会话直接复用，不重复新建
+    const activeMeta = sessionIndex.sessions.find(
+      (s) => s.id === activeSessionId
+    );
+    if (activeMeta?.title === DEFAULT_SESSION_TITLE && entries.length === 0) {
+      return;
+    }
+    const emptySession = sessionIndex.sessions.find(
+      (s) =>
+        s.title === DEFAULT_SESSION_TITLE &&
+        loadSessionEntries(s.id).length === 0
+    );
+    if (emptySession) {
+      switchSession(emptySession.id);
+      return;
+    }
+    const meta = newSessionMeta();
+    const next: AgentSessionIndex = {
+      sessions: [meta, ...sessionIndex.sessions],
+      activeId: meta.id,
+    };
+    setSessionIndex(next);
+    saveSessionIndex(next);
+  };
+
+  const removeSession = (id: string) => {
+    if (!confirm("删除当前会话及其聊天记录？")) return;
+    stop();
+    deleteSessionEntries(id);
+    const rest = sessionIndex.sessions.filter((s) => s.id !== id);
+    if (rest.length === 0) {
+      const meta = newSessionMeta();
+      const next: AgentSessionIndex = { sessions: [meta], activeId: meta.id };
+      setSessionIndex(next);
+      saveSessionIndex(next);
+      return;
+    }
+    const nextActive =
+      id === activeSessionId
+        ? [...rest].sort((a, b) => b.updatedAt - a.updatedAt)[0].id
+        : activeSessionId;
+    const next: AgentSessionIndex = { sessions: rest, activeId: nextActive };
+    setSessionIndex(next);
+    saveSessionIndex(next);
+  };
+
+  const switchMode = (next: AgentMode) => {
+    setMode(next);
+    saveMode(next);
+  };
+
+  const approveTool = async (entry: ToolEntry) => {
+    if (!targetSession) return;
+    updateTool(entry.callId, (t) => ({ ...t, status: "running" }));
+    try {
+      const output = await sshExec(targetSession.id, entry.command);
+      updateTool(entry.callId, (t) => ({ ...t, status: "approved", output }));
+      await agentToolResult(entry.requestId, entry.callId, true, output);
+    } catch (err) {
+      const message = `执行失败: ${String(err)}`;
+      updateTool(entry.callId, (t) => ({
+        ...t,
+        status: "error",
+        output: message,
+      }));
+      // 执行失败也如实回传，让模型有机会调整策略
+      await agentToolResult(entry.requestId, entry.callId, true, message);
+    }
+  };
+
+  const rejectTool = async (entry: ToolEntry) => {
+    updateTool(entry.callId, (t) => ({ ...t, status: "rejected" }));
+    await agentToolResult(entry.requestId, entry.callId, false, "");
   };
 
   const persistProviders = (next: AgentProvider[]) => {
@@ -224,10 +442,7 @@ export default function AgentPanel() {
     }
   };
 
-  const saveProvider = async (
-    provider: AgentProvider,
-    apiKey: string
-  ) => {
+  const saveProvider = async (provider: AgentProvider, apiKey: string) => {
     let saved = provider;
     if (apiKey) {
       try {
@@ -255,7 +470,11 @@ export default function AgentPanel() {
       <div className="panel-header">
         <span>AI 助手</span>
         <span className="panel-header-actions">
-          <button className="icon-btn" title="清空对话" onClick={clearChat}>
+          <button
+            className="icon-btn"
+            title="清空当前会话"
+            onClick={clearChat}
+          >
             <Eraser size={13} strokeWidth={1.8} />
           </button>
           <button
@@ -321,22 +540,127 @@ export default function AgentPanel() {
             </button>
           </div>
 
+          <div className="agent-session-bar">
+            <select
+              value={activeSessionId}
+              title="历史会话"
+              onChange={(e) => switchSession(e.target.value)}
+            >
+              {sortedSessions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title}
+                </option>
+              ))}
+            </select>
+            <button
+              className="icon-btn"
+              title="新建会话"
+              onClick={createSession}
+            >
+              <MessageSquarePlus size={13} strokeWidth={1.8} />
+            </button>
+            <button
+              className="icon-btn danger"
+              title="删除当前会话"
+              onClick={() => activeSessionId && removeSession(activeSessionId)}
+            >
+              <Trash2 size={13} strokeWidth={1.8} />
+            </button>
+          </div>
+
           <div className="agent-msgs" ref={msgsRef}>
-            {entries.map((e) => (
-              <div
-                key={e.id}
-                className={`agent-msg ${e.role}${e.error ? " error" : ""}`}
+            {entries.map((e) =>
+              e.kind === "message" ? (
+                <div
+                  key={e.id}
+                  className={`agent-msg ${e.role}${e.error ? " error" : ""}`}
+                >
+                  {e.content}
+                </div>
+              ) : (
+                <div key={e.id} className={`agent-tool ${e.status}`}>
+                  <div className="agent-tool-head">
+                    <span className="agent-tool-title">
+                      <Terminal size={12} strokeWidth={2} />
+                      {e.tool}
+                    </span>
+                    <code>{e.command}</code>
+                  </div>
+                  {e.status === "pending" ? (
+                    <div className="agent-tool-actions">
+                      <button
+                        className="primary"
+                        disabled={!busy || !targetSession}
+                        onClick={() => approveTool(e)}
+                      >
+                        批准执行
+                      </button>
+                      <button disabled={!busy} onClick={() => rejectTool(e)}>
+                        拒绝
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="agent-tool-status">
+                      {TOOL_STATUS_LABEL[e.status]}
+                    </div>
+                  )}
+                  {e.output && (
+                    <pre className="agent-tool-output">{e.output}</pre>
+                  )}
+                </div>
+              )
+            )}
+          </div>
+
+          <div className="agent-controls">
+            <div className="agent-modes">
+              <button
+                className={mode === "chat" ? "active" : ""}
+                title="问答模式：仅对话，不执行命令"
+                onClick={() => switchMode("chat")}
               >
-                {e.content}
-              </div>
-            ))}
+                <MessageSquare size={12} strokeWidth={2} />
+                问答
+              </button>
+              <button
+                className={mode === "agent" ? "active" : ""}
+                title="Agent 模式：将自然语言转为命令，经确认后执行"
+                onClick={() => switchMode("agent")}
+              >
+                <Terminal size={12} strokeWidth={2} />
+                Agent
+              </button>
+            </div>
+            {mode === "agent" && sessions.length > 0 && (
+              <select
+                className="agent-session-select"
+                value={targetSessionId}
+                title="选择命令执行的目标会话"
+                onChange={(e) => setTargetSessionId(e.target.value)}
+              >
+                {sessions.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.title}
+                  </option>
+                ))}
+              </select>
+            )}
+            {mode === "agent" && sessions.length === 0 && (
+              <span className="agent-session-hint">
+                先连接服务器才能执行命令
+              </span>
+            )}
           </div>
 
           <div className="agent-input">
             <textarea
               rows={2}
               value={input}
-              placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"
+              placeholder={
+                mode === "agent"
+                  ? "描述你想做的事，Agent 会转化为命令（执行前需确认）…"
+                  : "问点什么…（Enter 发送，Shift+Enter 换行）"
+              }
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (
@@ -357,7 +681,11 @@ export default function AgentPanel() {
               <button
                 className="agent-send"
                 title="发送"
-                disabled={!input.trim() || !activeProvider}
+                disabled={
+                  !input.trim() ||
+                  !activeProvider ||
+                  (mode === "agent" && !targetSession)
+                }
                 onClick={send}
               >
                 <Send size={14} strokeWidth={2} />

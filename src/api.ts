@@ -52,6 +52,11 @@ export function sshDisconnect(sessionId: string): Promise<void> {
   return invoke("ssh_disconnect", { sessionId });
 }
 
+/** Agent 模式：在指定 SSH 会话上用独立 exec 通道执行命令并收集输出 */
+export function sshExec(sessionId: string, command: string): Promise<string> {
+  return invoke("ssh_exec", { sessionId, command });
+}
+
 export function sftpList(sessionId: string, path: string): Promise<RemoteFile[]> {
   return invoke("sftp_list", { sessionId, path });
 }

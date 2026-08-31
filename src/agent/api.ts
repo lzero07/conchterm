@@ -1,7 +1,12 @@
 // 智能体后端命令的 TS 调用封装
 
 import { invoke, Channel } from "@tauri-apps/api/core";
-import type { AgentChatMessage, AgentEvent, AgentProvider } from "./types";
+import type {
+  AgentChatMessage,
+  AgentEvent,
+  AgentMode,
+  AgentProvider,
+} from "./types";
 
 export function agentSetKey(providerId: string, apiKey: string): Promise<void> {
   return invoke("agent_set_key", { providerId, apiKey });
@@ -19,6 +24,7 @@ export function agentHasKey(providerId: string): Promise<boolean> {
 export function agentChat(
   provider: AgentProvider,
   messages: AgentChatMessage[],
+  mode: AgentMode,
   onEvent: (event: AgentEvent) => void
 ): Promise<string> {
   const channel = new Channel<AgentEvent>();
@@ -31,8 +37,19 @@ export function agentChat(
       model: provider.model,
     },
     messages,
+    mode,
     onDelta: channel,
   });
+}
+
+/** 把（已确认执行的）工具结果回传给 Python，唤醒 agent 循环 */
+export function agentToolResult(
+  requestId: string,
+  callId: string,
+  approved: boolean,
+  output: string
+): Promise<void> {
+  return invoke("agent_tool_result", { requestId, callId, approved, output });
 }
 
 export function agentCancel(requestId: string): Promise<void> {
