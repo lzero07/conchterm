@@ -9,7 +9,12 @@ export interface AgentProvider {
   name: string;
   protocol: AgentProtocol;
   baseUrl: string;
-  model: string;
+  /** 默认模型（Provider 的首选） */
+  defaultModel: string;
+  /** 可用模型列表 */
+  models: string[];
+  /** 当前选中的模型（每个 Provider 各自记忆） */
+  activeModel: string;
   /** Key 本体存系统凭据管理器，这里只标记是否存在 */
   hasKey: boolean;
   createdAt: number;
@@ -22,10 +27,11 @@ export interface AgentChatMessage {
 
 /** Rust 端转发的 Python 流式事件 */
 export interface AgentEvent {
-  type: "delta" | "done" | "error" | "tool_call";
+  type: "delta" | "done" | "error" | "tool_call" | "models";
   id: string;
   content?: string;
   message?: string;
+  models?: string[];
   callId?: string;
   tool?: string;
   args?: Record<string, unknown>;

@@ -1,17 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowDown,
   ArrowUp,
   Bot,
+  Check,
   ChevronDown,
+  Cpu,
   Eraser,
   History,
   LoaderCircle,
   MessageSquare,
   Pencil,
   Plus,
+  ShieldCheck,
   Square,
   Terminal,
   Trash2,
+  Zap,
+  X,
 } from "lucide-react";
 import ProviderForm from "./ProviderForm";
 import { sshExec } from "../api";
@@ -20,6 +26,7 @@ import {
   agentChat,
   agentDeleteKey,
   agentHasKey,
+  agentListModels,
   agentSetKey,
   agentToolResult,
 } from "./api";
@@ -69,7 +76,7 @@ interface Props {
   activeTerminalId: string | null;
 }
 
-type MenuKind = "history" | "mode" | "provider" | "session";
+type MenuKind = "history" | "mode" | "provider" | "session" | "model";
 
 const SYSTEM_PROMPT =
   "你是 ConchTerm SSH 终端内置的 AI 助手，回答简洁直接，优先给出可执行的命令或步骤。";
@@ -112,8 +119,18 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [openMenu, setOpenMenu] = useState<MenuKind | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  /** Agent 自动放行：开启后命令无需确认直接执行（会话级，重启失效） */
+  const [autoExec, setAutoExec] = useState(
+    () => sessionStorage.getItem("agentAutoExec") === "1"
+  );
+  const [autoExecConfirmOpen, setAutoExecConfirmOpen] = useState(false);
+  /** 面板较窄时芯片收缩为纯图标 */
+  const [composerCompact, setComposerCompact] = useState(false);
   const activeStreamRef = useRef<ActiveStream | null>(null);
+  const autoExecRef = useRef(autoExec);
   const msgsRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLDivElement | null>(null);
 
   // 思考中指示：请求进行中、当前气泡还没有输出、且没有在等确认/执行工具
   const activeStream = activeStreamRef.current;
@@ -142,6 +159,9 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   const sortedSessions = [...sessionIndex.sessions].sort(
     (a, b) => b.updatedAt - a.updatedAt
   );
+  const currentModel = activeProvider
+    ? activeProvider.activeModel || activeProvider.defaultModel
+    : "";
   // 会话刚载入时跳过一次保存，避免用空数组覆盖已存记录
   const skipSaveRef = useRef(true);
 
@@ -208,6 +228,19 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     msgsRef.current?.scrollTo({ top: msgsRef.current.scrollHeight });
   }, [entries]);
 
+  // 监听合成输入区宽度：窄面板自动切换为紧凑排版
+  useEffect(() => {
+    const el = composerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((observed) => {
+      for (const entry of observed) {
+        setComposerCompact(entry.contentRect.width < 330);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
   const updateMessage = (
     entryId: string,
     fn: (e: MessageEntry) => MessageEntry
@@ -248,19 +281,17 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
       if (stream.cancelled) return;
       const command =
         typeof event.args?.command === "string" ? event.args.command : "";
-      setEntries((prev) => [
-        ...prev,
-        {
-          kind: "tool",
-          id: crypto.randomUUID(),
-          callId: event.callId ?? "",
-          requestId: stream.requestId ?? "",
-          tool: event.tool ?? "",
-          command,
-          status: "pending",
-          collapsed: false,
-        },
-      ]);
+      const toolEntry: ToolEntry = {
+        kind: "tool",
+        id: crypto.randomUUID(),
+        callId: event.callId ?? "",
+        requestId: stream.requestId ?? "",
+        tool: event.tool ?? "",
+        command,
+        status: autoExecRef.current ? "running" : "pending",
+        collapsed: false,
+      };
+      setEntries((prev) => [...prev, toolEntry]);
       // 工具之后的文本应显示在命令下方，另起一个助手气泡
       const nextEntry: MessageEntry = {
         kind: "message",
@@ -270,6 +301,10 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
       };
       setEntries((prev) => [...prev, nextEntry]);
       stream.messageEntryId = nextEntry.id;
+      // 自动放行模式：无需用户确认，直接执行
+      if (autoExecRef.current) {
+        void executeTool(toolEntry);
+      }
       return;
     }
     if (event.type === "done") {
@@ -389,6 +424,25 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     saveMode(next);
   };
 
+  const toggleAutoExec = () => {
+    const next = !autoExec;
+    if (next) {
+      // 自定义暗色弹窗：原生对话框样式无法跟随应用主题
+      setAutoExecConfirmOpen(true);
+      return;
+    }
+    setAutoExec(false);
+    autoExecRef.current = false;
+    sessionStorage.setItem("agentAutoExec", "0");
+  };
+
+  const confirmAutoExec = () => {
+    setAutoExecConfirmOpen(false);
+    setAutoExec(true);
+    autoExecRef.current = true;
+    sessionStorage.setItem("agentAutoExec", "1");
+  };
+
   const switchSession = (id: string) => {
     if (id === activeSessionId) return;
     // 流式进行中切换会把增量写进错误会话，先取消
@@ -467,7 +521,8 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     saveSessionIndex(next);
   };
 
-  const approveTool = async (entry: ToolEntry) => {
+  /** 执行工具：需确认时由批准按钮触发，自动放行时由 tool_call 事件触发 */
+  const executeTool = async (entry: ToolEntry) => {
     if (!targetSession) return;
     updateTool(entry.callId, (t) => ({ ...t, status: "running" }));
     try {
@@ -490,6 +545,10 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
       // 执行失败也如实回传，让模型有机会调整策略
       await agentToolResult(entry.requestId, entry.callId, true, message);
     }
+  };
+
+  const approveTool = (entry: ToolEntry) => {
+    void executeTool(entry);
   };
 
   const rejectTool = async (entry: ToolEntry) => {
@@ -545,8 +604,48 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     setFormOpen(false);
   };
 
+  const setModelActive = (model: string) => {
+    if (!activeProvider) return;
+    persistProviders(
+      providers.map((p) =>
+        p.id === activeProvider.id ? { ...p, activeModel: model } : p
+      )
+    );
+  };
+
+  const fetchModels = () => {
+    const provider = activeProvider;
+    if (!provider || fetchingModels) return;
+    setFetchingModels(true);
+    agentListModels(provider, (event) => {
+      if (event.type === "models") {
+        const fetched = event.models ?? [];
+        if (fetched.length === 0) {
+          alert("该 Provider 未返回任何模型");
+        }
+        setProviders((prev) =>
+          prev.map((p) => {
+            if (p.id !== provider.id) return p;
+            const merged = Array.from(new Set([...p.models, ...fetched]));
+            return { ...p, models: merged };
+          })
+        );
+        setFetchingModels(false);
+      } else if (event.type === "error") {
+        alert(`获取模型列表失败：${event.message ?? "未知错误"}`);
+        setFetchingModels(false);
+      }
+    }).catch((err) => {
+      alert(String(err));
+      setFetchingModels(false);
+    });
+  };
+
   const canSend =
-    !!input.trim() && !!activeProvider && (mode === "chat" || !!targetSession);
+    !!input.trim() &&
+    !!activeProvider &&
+    !!currentModel &&
+    (mode === "chat" || !!targetSession);
 
   return (
     <div className="panel agent-panel">
@@ -709,7 +808,10 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
       </div>
 
       {/* 底部输入合成区 */}
-      <div className="agent-composer">
+      <div
+        ref={composerRef}
+        className={`agent-composer${composerCompact ? " compact" : ""}`}
+      >
         <div className="agent-composer-row">
           <button
             className="agent-chip"
@@ -722,7 +824,7 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
               <MessageSquare size={12} strokeWidth={2} />
             )}
             <span>{mode === "agent" ? "Agent · 命令" : "Ask · 问答"}</span>
-            <ChevronDown size={11} strokeWidth={2} />
+            <ChevronDown size={11} strokeWidth={2} className="agent-chip-caret" />
             {openMenu === "mode" && (
               <div className="agent-menu">
                 <div
@@ -760,7 +862,7 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
             >
               <Terminal size={12} strokeWidth={2} />
               <span>{targetSession?.title ?? "选择会话"}</span>
-              <ChevronDown size={11} strokeWidth={2} />
+              <ChevronDown size={11} strokeWidth={2} className="agent-chip-caret" />
               {openMenu === "session" && (
                 <div className="agent-menu">
                   {sessions.map((s) => (
@@ -785,6 +887,67 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
           <span className="spacer" />
           <button
             className="agent-chip"
+            title="切换当前 Provider 下的模型"
+            onClick={() => setOpenMenu(openMenu === "model" ? null : "model")}
+          >
+            <Cpu size={12} strokeWidth={2} />
+            <span>{currentModel || "设置模型"}</span>
+            <ChevronDown size={11} strokeWidth={2} className="agent-chip-caret" />
+            {openMenu === "model" && (
+              <div className="agent-menu right">
+                {(activeProvider?.models ?? []).map((m) => (
+                  <div
+                    key={m}
+                    className={`agent-menu-item${
+                      m === currentModel ? " active" : ""
+                    }`}
+                    onClick={() => {
+                      setModelActive(m);
+                      setOpenMenu(null);
+                    }}
+                  >
+                    <span className="grow">{m}</span>
+                    {m === activeProvider?.defaultModel && (
+                      <span className="agent-menu-badge">默认</span>
+                    )}
+                    {m === currentModel && <Check size={12} strokeWidth={2} />}
+                  </div>
+                ))}
+                <div
+                  className="agent-menu-item add"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!fetchingModels) fetchModels();
+                  }}
+                >
+                  {fetchingModels ? (
+                    <LoaderCircle
+                      size={12}
+                      strokeWidth={2}
+                      className="spin"
+                    />
+                  ) : (
+                    <ArrowDown size={12} strokeWidth={2} />
+                  )}
+                  获取模型列表
+                </div>
+                <div
+                  className="agent-menu-item add"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setEditing(activeProvider);
+                    setFormOpen(true);
+                    setOpenMenu(null);
+                  }}
+                >
+                  <Pencil size={12} strokeWidth={2} />
+                  管理模型
+                </div>
+              </div>
+            )}
+          </button>
+          <button
+            className="agent-chip"
             title="切换 / 管理 AI Provider"
             onClick={() =>
               setOpenMenu(openMenu === "provider" ? null : "provider")
@@ -792,7 +955,7 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
           >
             <Bot size={12} strokeWidth={2} />
             <span>{activeProvider?.name ?? "选择模型"}</span>
-            <ChevronDown size={11} strokeWidth={2} />
+            <ChevronDown size={11} strokeWidth={2} className="agent-chip-caret" />
             {openMenu === "provider" && (
               <div className="agent-menu right">
                 {providers.map((p) => (
@@ -875,9 +1038,24 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
           }}
         />
         <div className="agent-composer-row">
-          <span className="agent-hint">
-            {mode === "agent" ? "命令执行前需确认" : ""}
-          </span>
+          {mode === "agent" && (
+            <button
+              className={`agent-hint-toggle${autoExec ? " warn" : ""}`}
+              title={
+                autoExec
+                  ? "自动执行已开启，点击关闭以恢复命令确认"
+                  : "开启自动执行（危险：命令无需确认直接执行）"
+              }
+              onClick={toggleAutoExec}
+            >
+              {autoExec ? (
+                <Zap size={11} strokeWidth={2} />
+              ) : (
+                <ShieldCheck size={11} strokeWidth={2} />
+              )}
+              {autoExec ? "自动执行中 · 点击关闭" : "命令执行前需确认"}
+            </button>
+          )}
           <span className="spacer" />
           <button
             className={`agent-send-circle${busy || canSend ? " ready" : ""}`}
@@ -893,6 +1071,44 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
           </button>
         </div>
       </div>
+
+      {autoExecConfirmOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setAutoExecConfirmOpen(false)}
+        >
+          <div
+            className="modal danger-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-title">
+              <h3>危险操作确认：开启自动执行</h3>
+              <button
+                className="icon-btn"
+                title="关闭"
+                onClick={() => setAutoExecConfirmOpen(false)}
+              >
+                <X size={15} strokeWidth={1.8} />
+              </button>
+            </div>
+            <p className="danger-text">
+              开启后 Agent 执行的命令将不再需要你的确认，模型可以未经允许地在目标服务器上直接执行任意命令（包括删除文件、修改系统、重启服务等）。
+            </p>
+            <p className="danger-text">
+              请自行评估并承担由此产生的一切风险与后果，操作失误与本系统无关。
+            </p>
+            <p className="danger-question">确定要开启自动执行吗？</p>
+            <div className="modal-actions">
+              <button onClick={() => setAutoExecConfirmOpen(false)}>
+                取消
+              </button>
+              <button className="primary danger" onClick={confirmAutoExec}>
+                我已知晓风险，开启
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {formOpen && (
         <ProviderForm

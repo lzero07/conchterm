@@ -60,6 +60,8 @@ pub enum AgentEvent {
         tool: String,
         args: serde_json::Value,
     },
+    #[serde(rename = "models")]
+    Models { id: String, models: Vec<String> },
 }
 
 impl AgentEvent {
@@ -68,7 +70,8 @@ impl AgentEvent {
             AgentEvent::Delta { id, .. }
             | AgentEvent::Done { id }
             | AgentEvent::Error { id, .. }
-            | AgentEvent::ToolCall { id, .. } => Some(id),
+            | AgentEvent::ToolCall { id, .. }
+            | AgentEvent::Models { id, .. } => Some(id),
             AgentEvent::Ready => None,
         }
     }
@@ -288,7 +291,7 @@ fn spawn_reader(
             let Some(id) = event.request_id().map(str::to_string) else {
                 continue;
             };
-            let finished = matches!(event, AgentEvent::Done { .. } | AgentEvent::Error { .. });
+            let finished = matches!(event, AgentEvent::Done { .. } | AgentEvent::Error { .. } | AgentEvent::Models { .. });
             let channel = pending.lock().unwrap().get(&id).cloned();
             if let Some(channel) = channel {
                 let _ = channel.send(event);
@@ -418,6 +421,64 @@ pub fn agent_tool_result(
             .map_err(|e| format!("发送工具结果失败: {e}")),
         None => Err("智能体进程未运行".into()),
     }
+}
+
+/// 拉取 Provider 可用模型列表：请求转发给 Python sidecar（/models 接口）
+#[tauri::command]
+pub async fn agent_list_models(
+    state: State<'_, AgentState>,
+    provider: AgentProviderInput,
+    on_event: Channel<AgentEvent>,
+) -> Result<String, String> {
+    let api_key = read_api_key(&provider.id)?;
+
+    // 冷启动保护：sidecar 未运行时先拉起
+    let process = state.process.clone();
+    let pending = state.pending.clone();
+    let spawn_lock = state.spawn_lock.clone();
+    let ensure = tokio::task::spawn_blocking(move || {
+        ensure_process(&process, &pending, &spawn_lock)
+    })
+    .await
+    .map_err(|e| format!("智能体任务执行失败: {e}"))?;
+    ensure?;
+
+    let request_id = format!("m{}", NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed));
+    let request = json!({
+        "type": "list_models",
+        "id": request_id,
+        "provider": {
+            "protocol": provider.protocol,
+            "base_url": provider.base_url,
+            "model": provider.model,
+            "api_key": api_key,
+        },
+    });
+    let line = format!("{request}
+");
+
+    state
+        .pending
+        .lock()
+        .unwrap()
+        .insert(request_id.clone(), on_event);
+
+    let write_result = {
+        let mut guard = state.process.lock().unwrap();
+        match guard.as_mut() {
+            Some(p) => p
+                .stdin
+                .write_all(line.as_bytes())
+                .and_then(|_| p.stdin.flush()),
+            None => Err(std::io::Error::other("进程未运行")),
+        }
+    };
+    if let Err(e) = write_result {
+        state.pending.lock().unwrap().remove(&request_id);
+        return Err(format!("发送模型列表请求失败: {e}"));
+    }
+
+    Ok(request_id)
 }
 
 #[tauri::command]

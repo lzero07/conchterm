@@ -13,6 +13,10 @@
 
 请求还可以是（Agent 模式的工具执行结果回传）：
   {"type": "tool_result", "callId": "c1", "approved": true, "output": "..."}
+
+也可以请求获取 Provider 可用的模型列表：
+  请求：{"type": "list_models", "id": "m1", "provider": {...}}
+  响应：{"type": "models", "id": "m1", "models": ["..."]}
 """
 
 import json
@@ -95,6 +99,30 @@ def handle_tool_result(req: dict) -> None:
             "output": req.get("output", ""),
         }
         entry["event"].set()
+
+
+def handle_list_models(req: dict) -> None:
+    """拉取 Provider 可用模型列表（OpenAI /models 或 Anthropic /v1/models）。"""
+    req_id = req.get("id", "")
+    try:
+        provider = req.get("provider", {})
+        api_key = provider.get("api_key") or "EMPTY"
+        base_url = provider.get("base_url") or None
+        models: list = []
+        if provider.get("protocol") == "anthropic":
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
+            models = [m.id for m in client.models.list().data]
+        else:
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key, base_url=base_url)
+            models = [m.id for m in client.models.list().data]
+        emit({"type": "models", "id": req_id, "models": models})
+    except Exception as exc:  # 网络/鉴权失败统一转成事件回传
+        message = str(exc) or exc.__class__.__name__
+        emit({"type": "error", "id": req_id, "message": message})
 
 
 def handle_agent(req: dict) -> None:
@@ -187,6 +215,10 @@ def main() -> None:
             _WORKER_THREADS.append(worker)
         elif req.get("type") == "tool_result":
             handle_tool_result(req)
+        elif req.get("type") == "list_models":
+            worker = threading.Thread(target=handle_list_models, args=(req,))
+            worker.start()
+            _WORKER_THREADS.append(worker)
 
     # stdin EOF：等待在途请求完成后再退出（上限 60s 防止卡死）
     for t in _WORKER_THREADS:

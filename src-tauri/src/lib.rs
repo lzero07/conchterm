@@ -39,6 +39,7 @@ pub fn run() {
             drag_out::start_file_drag,
             tray::set_tray_visible,
             agent_bridge::agent_chat,
+            agent_bridge::agent_list_models,
             agent_bridge::agent_tool_result,
             agent_bridge::agent_cancel,
             agent_bridge::agent_set_key,

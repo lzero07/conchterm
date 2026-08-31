@@ -154,7 +154,28 @@ export function deleteSessionEntries(sessionId: string): void {
 export function loadProviders(): AgentProvider[] {
   try {
     const raw = localStorage.getItem(PROVIDERS_KEY);
-    return raw ? (JSON.parse(raw) as AgentProvider[]) : [];
+    if (!raw) return [];
+    // 迁移：旧版单一 model 字段 -> 默认模型 + 模型列表 + 当前选中
+    return (JSON.parse(raw) as Record<string, unknown>[])
+      .map((p) => {
+        const legacyModel = typeof p.model === "string" ? p.model : "";
+        const defaultModel =
+          typeof p.defaultModel === "string" && p.defaultModel
+            ? p.defaultModel
+            : legacyModel;
+        const models =
+          Array.isArray(p.models) && p.models.length > 0
+            ? (p.models as string[])
+            : defaultModel
+              ? [defaultModel]
+              : [];
+        const activeModel =
+          typeof p.activeModel === "string" && p.activeModel
+            ? p.activeModel
+            : defaultModel;
+        return { ...p, defaultModel, models, activeModel } as AgentProvider;
+      })
+      .filter((p) => typeof p.id === "string" && p.id !== "");
   } catch {
     return [];
   }

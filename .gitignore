@@ -13,6 +13,9 @@ __pycache__/
 .idea/
 *.swp
 
+# Docs (图标源文件等本地文档)
+docs/
+
 # OS
 Thumbs.db
 .DS_Store

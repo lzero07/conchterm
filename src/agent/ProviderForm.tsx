@@ -34,7 +34,12 @@ export default function ProviderForm({ initial, onSave, onCancel }: Props) {
   const [baseUrl, setBaseUrl] = useState(
     initial?.baseUrl ?? PROTOCOL_META.openai.baseUrl
   );
-  const [model, setModel] = useState(initial?.model ?? "");
+  const [defaultModel, setDefaultModel] = useState(
+    initial?.defaultModel ?? ""
+  );
+  const [modelsText, setModelsText] = useState(
+    initial?.models.join("\n") ?? ""
+  );
   const [apiKey, setApiKey] = useState("");
 
   // 切换协议时若地址还是另一个协议的默认值，自动跟随
@@ -45,10 +50,11 @@ export default function ProviderForm({ initial, onSave, onCancel }: Props) {
     setProtocol(next);
   };
 
+  // 模型列表选填：留空时以默认模型建列表，也可稍后在对话框中在线获取
   const valid =
     name.trim() &&
     baseUrl.trim() &&
-    model.trim() &&
+    defaultModel.trim() &&
     (initial?.hasKey || apiKey.trim());
 
   return (
@@ -87,11 +93,20 @@ export default function ProviderForm({ initial, onSave, onCancel }: Props) {
           />
         </label>
         <label>
-          模型
+          默认模型
           <input
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
+            value={defaultModel}
+            onChange={(e) => setDefaultModel(e.target.value)}
             placeholder={PROTOCOL_META[protocol].modelPlaceholder}
+          />
+        </label>
+        <label>
+          模型列表（每行一个，可稍后在对话框中获取）
+          <textarea
+            rows={3}
+            value={modelsText}
+            onChange={(e) => setModelsText(e.target.value)}
+            placeholder={"如：\ndeepseek-chat\ndeepseek-reasoner"}
           />
         </label>
         <label>
@@ -120,7 +135,21 @@ export default function ProviderForm({ initial, onSave, onCancel }: Props) {
                   name: name.trim(),
                   protocol,
                   baseUrl: baseUrl.trim().replace(/\/+$/, ""),
-                  model: model.trim(),
+                  defaultModel: defaultModel.trim(),
+                  models: (() => {
+                    const list = modelsText
+                      .split(/[\n,]/)
+                      .map((s) => s.trim())
+                      .filter(Boolean);
+                    if (
+                      defaultModel.trim() &&
+                      !list.includes(defaultModel.trim())
+                    ) {
+                      list.unshift(defaultModel.trim());
+                    }
+                    return list;
+                  })(),
+                  activeModel: initial?.activeModel || defaultModel.trim(),
                   hasKey: initial?.hasKey ?? false,
                   createdAt: initial?.createdAt ?? Date.now(),
                 },

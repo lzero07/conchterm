@@ -34,7 +34,7 @@ export function agentChat(
       id: provider.id,
       protocol: provider.protocol,
       baseUrl: provider.baseUrl,
-      model: provider.model,
+      model: provider.activeModel || provider.defaultModel,
     },
     messages,
     mode,
@@ -43,6 +43,24 @@ export function agentChat(
 }
 
 /** 把（已确认执行的）工具结果回传给 Python，唤醒 agent 循环 */
+/** 拉取 Provider 可用模型列表（经 Python sidecar 调 /models 接口） */
+export function agentListModels(
+  provider: AgentProvider,
+  onEvent: (event: AgentEvent) => void
+): Promise<string> {
+  const channel = new Channel<AgentEvent>();
+  channel.onmessage = onEvent;
+  return invoke<string>("agent_list_models", {
+    provider: {
+      id: provider.id,
+      protocol: provider.protocol,
+      baseUrl: provider.baseUrl,
+      model: provider.defaultModel,
+    },
+    onEvent: channel,
+  });
+}
+
 export function agentToolResult(
   requestId: string,
   callId: string,
