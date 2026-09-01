@@ -8,6 +8,7 @@ import {
   Cpu,
   Eraser,
   History,
+  Info,
   LoaderCircle,
   MessageSquare,
   Pencil,
@@ -1016,13 +1017,21 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
             )}
           </button>
         </div>
+        {mode === "agent" && !targetSession && (
+          <div className="agent-session-hint">
+            <Info size={12} strokeWidth={1.8} />
+            Agent 模式需要先打开一个终端会话才能执行命令
+          </div>
+        )}
         <textarea
           className="agent-composer-input"
           rows={2}
           value={input}
           placeholder={
             mode === "agent"
-              ? "描述你想做的事，Agent 将转化为命令执行（执行前需确认）…"
+              ? targetSession
+                ? "描述你想做的事，Agent 将转化为命令执行（执行前需确认）…"
+                : "先打开一个终端会话，Agent 才能执行命令…"
               : "问任何问题…（Enter 发送，Shift+Enter 换行）"
           }
           onChange={(e) => setInput(e.target.value)}
@@ -1059,7 +1068,13 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
           <span className="spacer" />
           <button
             className={`agent-send-circle${busy || canSend ? " ready" : ""}`}
-            title={busy ? "停止生成" : "发送"}
+            title={
+              busy
+                ? "停止生成"
+                : mode === "agent" && !targetSession
+                  ? "需要先打开一个终端会话"
+                  : "发送"
+            }
             disabled={!busy && !canSend}
             onClick={busy ? stop : send}
           >

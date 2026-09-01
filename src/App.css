@@ -1117,6 +1117,18 @@ td.dir .file-icon { color: var(--amber); }
   resize: none;
 }
 .agent-composer-input:focus-visible { outline: none; }
+.agent-session-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius);
+  background: rgba(240, 185, 90, 0.12);
+  color: var(--amber);
+  font-size: 11.5px;
+}
+.agent-session-hint svg { flex: none; }
+
 .agent-hint-toggle {
   display: inline-flex;
   align-items: center;
