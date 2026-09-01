@@ -291,7 +291,10 @@ fn spawn_reader(
             let Some(id) = event.request_id().map(str::to_string) else {
                 continue;
             };
-            let finished = matches!(event, AgentEvent::Done { .. } | AgentEvent::Error { .. } | AgentEvent::Models { .. });
+            let finished = matches!(
+                event,
+                AgentEvent::Done { .. } | AgentEvent::Error { .. } | AgentEvent::Models { .. }
+            );
             let channel = pending.lock().unwrap().get(&id).cloned();
             if let Some(channel) = channel {
                 let _ = channel.send(event);
@@ -436,11 +439,10 @@ pub async fn agent_list_models(
     let process = state.process.clone();
     let pending = state.pending.clone();
     let spawn_lock = state.spawn_lock.clone();
-    let ensure = tokio::task::spawn_blocking(move || {
-        ensure_process(&process, &pending, &spawn_lock)
-    })
-    .await
-    .map_err(|e| format!("智能体任务执行失败: {e}"))?;
+    let ensure =
+        tokio::task::spawn_blocking(move || ensure_process(&process, &pending, &spawn_lock))
+            .await
+            .map_err(|e| format!("智能体任务执行失败: {e}"))?;
     ensure?;
 
     let request_id = format!("m{}", NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed));
@@ -454,8 +456,10 @@ pub async fn agent_list_models(
             "api_key": api_key,
         },
     });
-    let line = format!("{request}
-");
+    let line = format!(
+        "{request}
+"
+    );
 
     state
         .pending
