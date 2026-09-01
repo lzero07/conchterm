@@ -10,6 +10,8 @@ __pycache__/
 
 # Editor
 .vscode/
+.codex
+.claude
 .idea/
 *.swp
 

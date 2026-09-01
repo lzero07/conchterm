@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Info, Palette, RotateCcw, Search } from "lucide-react";
 import {
   COLOR_THEMES,
@@ -17,7 +17,9 @@ import {
 
 interface Props {
   settings: AppSettings;
+  onPreview: (next: AppSettings) => void;
   onApply: (next: AppSettings) => void;
+  onApplyAndClose: (next: AppSettings) => void;
   onClose: () => void;
 }
 
@@ -35,7 +37,13 @@ const RADIUS_OPTIONS: [RadiusStyle, string][] = [
   ["large", "大圆角"],
 ];
 
-export default function SettingsView({ settings, onApply, onClose }: Props) {
+export default function SettingsView({
+  settings,
+  onPreview,
+  onApply,
+  onApplyAndClose,
+  onClose,
+}: Props) {
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [category, setCategory] = useState<Category>("appearance");
   const [query, setQuery] = useState("");
@@ -48,6 +56,11 @@ export default function SettingsView({ settings, onApply, onClose }: Props) {
     () => JSON.stringify(draft) === JSON.stringify(DEFAULT_SETTINGS),
     [draft]
   );
+
+  // 草稿即预览：改动即时应用到界面，关闭或未应用时由外层还原
+  useEffect(() => {
+    onPreview(draft);
+  }, [draft, onPreview]);
 
   const patch = (p: Partial<AppSettings>) =>
     setDraft((d) => ({ ...d, ...p }));
@@ -338,10 +351,7 @@ export default function SettingsView({ settings, onApply, onClose }: Props) {
           </button>
           <button
             className="primary"
-            onClick={() => {
-              onApply(draft);
-              onClose();
-            }}
+            onClick={() => onApplyAndClose(draft)}
           >
             应用并关闭
           </button>

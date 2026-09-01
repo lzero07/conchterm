@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bot,
   Copy,
@@ -66,6 +66,9 @@ export default function App() {
   const [servers, setServers] = useState<ServerProfile[]>(loadServers);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [previewSettings, setPreviewSettings] = useState<AppSettings | null>(
+    null
+  );
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("servers");
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ServerProfile | null>(null);
@@ -107,10 +110,16 @@ export default function App() {
     return () => unlisten?.();
   }, []);
 
-  // 外观设置：主题 / 强调色 / 圆角 / 界面字体
+  // 外观设置即时生效的统一入口：提交与预览共用
+  const applySideEffects = useCallback((s: AppSettings) => {
+    applyAppearance(s);
+    void applyZoom(s.zoom);
+    invoke("set_tray_visible", { visible: s.trayIcon }).catch(() => {});
+  }, []);
+
   useEffect(() => {
-    applyAppearance(settings);
-  }, [settings]);
+    applySideEffects(settings);
+  }, [settings, applySideEffects]);
 
   // 跟随系统时监听系统主题切换
   useEffect(() => {
@@ -119,33 +128,53 @@ export default function App() {
     const onChange = () => applyAppearance(settings);
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
-  }, [settings]);
+  }, [settings, applyAppearance]);
 
-  // 界面缩放走 WebView 原生缩放
-  useEffect(() => {
-    void applyZoom(settings.zoom);
-  }, [settings.zoom]);
-
-  // 托盘图标开关（Rust 端常驻托盘实例，这里只切换可见性）
-  useEffect(() => {
-    invoke("set_tray_visible", { visible: settings.trayIcon }).catch(() => {});
-  }, [settings.trayIcon]);
+  // 预览优先：设置页打开时草稿即时生效，关闭后回到已提交配置
+  const effectiveSettings = previewSettings ?? settings;
 
   const terminalAppearance = useMemo<TerminalAppearance>(() => {
-    const theme = COLOR_THEMES[settings.colorTheme] ?? COLOR_THEMES.ocean;
+    const theme =
+      COLOR_THEMES[effectiveSettings.colorTheme] ?? COLOR_THEMES.ocean;
     return {
       fontFamily:
-        TERMINAL_FONTS[settings.terminalFont]?.stack ??
+        TERMINAL_FONTS[effectiveSettings.terminalFont]?.stack ??
         TERMINAL_FONTS.consolas.stack,
-      theme: resolveTheme(settings.themeMode),
+      theme: resolveTheme(effectiveSettings.themeMode),
       accent: theme.accent,
       selection: theme.selection,
     };
-  }, [settings.colorTheme, settings.themeMode, settings.terminalFont]);
+  }, [
+    effectiveSettings.colorTheme,
+    effectiveSettings.themeMode,
+    effectiveSettings.terminalFont,
+  ]);
 
   const applySettings = (next: AppSettings) => {
     setSettings(next);
     saveSettings(next);
+    setPreviewSettings(null);
+    applySideEffects(next);
+  };
+
+  const applySettingsAndClose = (next: AppSettings) => {
+    applySettings(next);
+    setSettingsOpen(false);
+  };
+
+  const previewSettingsChange = useCallback(
+    (next: AppSettings) => {
+      setPreviewSettings(next);
+      applySideEffects(next);
+    },
+    [applySideEffects]
+  );
+
+  const closeSettings = () => {
+    setPreviewSettings(null);
+    setSettingsOpen(false);
+    // 丢弃未应用的预览，还原到已提交配置
+    applySideEffects(settings);
   };
 
   // 文件面板跟随当前活跃终端的会话
@@ -298,7 +327,7 @@ export default function App() {
           <button
             className={`title-ai${settingsOpen ? " active" : ""}`}
             title="设置"
-            onClick={() => setSettingsOpen((open) => !open)}
+            onClick={settingsOpen ? closeSettings : () => setSettingsOpen(true)}
           >
             <SettingsIcon size={17} strokeWidth={2} />
           </button>
@@ -495,8 +524,10 @@ export default function App() {
         {settingsOpen && (
           <SettingsView
             settings={settings}
+            onPreview={previewSettingsChange}
             onApply={applySettings}
-            onClose={() => setSettingsOpen(false)}
+            onApplyAndClose={applySettingsAndClose}
+            onClose={closeSettings}
           />
         )}
       </main>
