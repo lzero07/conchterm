@@ -128,6 +128,11 @@ def handle_list_models(req: dict) -> None:
 def handle_agent(req: dict) -> None:
     """Agent 模式：bind_tools 循环，模型决定执行什么，宿主确认后执行并回填。"""
     req_id = req.get("id", "")
+    # 回合上限可由宿主按用户设置下发（5-500），缺省用本地护栏值
+    try:
+        max_rounds = max(5, min(500, int(req.get("max_rounds") or MAX_TOOL_ROUNDS)))
+    except (TypeError, ValueError):
+        max_rounds = MAX_TOOL_ROUNDS
     try:
         from langchain_core.messages import ToolMessage
 
@@ -136,7 +141,7 @@ def handle_agent(req: dict) -> None:
         model = build_model(req.get("provider", {})).bind_tools([run_command])
         messages = to_messages(req.get("messages", []))
 
-        for _ in range(MAX_TOOL_ROUNDS):
+        for _ in range(max_rounds):
             response = model.invoke(messages)
             tool_calls = getattr(response, "tool_calls", None) or []
             text = extract_text(response.content)
@@ -181,7 +186,7 @@ def handle_agent(req: dict) -> None:
             {
                 "type": "error",
                 "id": req_id,
-                "message": f"已达到最大工具调用轮数（{MAX_TOOL_ROUNDS}）",
+                "message": f"已达到最大工具调用轮数（{max_rounds}）",
             }
         )
     except Exception as exc:  # 网络/鉴权/缺依赖等异常统一转成事件回传

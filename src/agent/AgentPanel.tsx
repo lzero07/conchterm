@@ -36,13 +36,11 @@ import {
   deleteSessionEntries,
   DEFAULT_SESSION_TITLE,
   loadActiveProviderId,
-  loadMode,
   loadProviders,
   loadSessionEntries,
   loadSessionIndex,
   newSessionMeta,
   saveActiveProviderId,
-  saveMode,
   saveProviders,
   saveSessionEntries,
   saveSessionIndex,
@@ -73,9 +71,18 @@ export interface SessionInfo {
   title: string;
 }
 
+/** 从设置页传入的 AI 行为配置 */
+export interface AiSettings {
+  maxRounds: number;
+  maxRetries: number;
+  defaultMode: AgentMode;
+  customInstruction: string;
+}
+
 interface Props {
   sessions: SessionInfo[];
   activeTerminalId: string | null;
+  aiSettings: AiSettings;
 }
 
 type MenuKind = "history" | "mode" | "provider" | "session" | "model";
@@ -97,6 +104,29 @@ const TOOL_STATUS_LABEL: Record<ToolStatus, string> = {
   timeout: "确认超时",
 };
 
+/** 瞬时错误识别：限流/超时/网络波动类错误才自动重试，鉴权/参数类错误直接报出 */
+function isTransientError(message: string): boolean {
+  const m = message.toLowerCase();
+  return [
+    "rate limit",
+    "ratelimit",
+    "429",
+    "timeout",
+    "timed out",
+    "超时",
+    "temporarily",
+    "overloaded",
+    "503",
+    "502",
+    "504",
+    "network",
+    "connection",
+    "连接",
+    "econn",
+    "fetch failed",
+  ].some((k) => m.includes(k));
+}
+
 function formatTime(ts: number): string {
   const d = new Date(ts);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -104,11 +134,12 @@ function formatTime(ts: number): string {
 }
 
 /** AI 助手面板：会话管理 / 问答与 Agent 双模式 / 流式聊天 / 命令确认 */
-export default function AgentPanel({ sessions, activeTerminalId }: Props) {
+export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: Props) {
   const dialogs = useDialogs();
   const [providers, setProviders] = useState<AgentProvider[]>(loadProviders);
   const [activeId, setActiveId] = useState<string>(loadActiveProviderId);
-  const [mode, setMode] = useState<AgentMode>(loadMode);
+  // 初始模式取设置里的默认值；会话内切换只影响当前对话，不写回全局默认
+  const [mode, setMode] = useState<AgentMode>(aiSettings.defaultMode);
   const [sessionIndex, setSessionIndex] =
     useState<AgentSessionIndex>(loadSessionIndex);
   const [targetSessionId, setTargetSessionId] = useState<string>(
@@ -191,6 +222,17 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 设置页改了 Provider 列表 / 默认 Provider 时同步刷新
+  useEffect(() => {
+    const sync = () => {
+      setProviders(loadProviders());
+      setActiveId(loadActiveProviderId());
+    };
+    window.addEventListener("conchterm.providers-changed", sync);
+    return () =>
+      window.removeEventListener("conchterm.providers-changed", sync);
   }, []);
 
   // 活跃终端变化时跟随切换目标会话
@@ -379,13 +421,17 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
       cancelled: false,
     };
 
-    // 上下文只带消息条目；空内容的占位/已取消条目不进入
+    // 上下文只带消息条目；空内容的占位/已取消条目不进入。
+    // 全局自定义指令（设置页）以显式包裹注入 system prompt——
+    // 弱模型对无标记的追加段落容易忽略，明确边界能显著提高遵循率
+    const instruction = aiSettings.customInstruction.trim();
+    const systemPrompt =
+      (mode === "agent" ? SYSTEM_PROMPT + AGENT_PROMPT_EXTRA : SYSTEM_PROMPT) +
+      (instruction
+        ? `\n\n[用户的固定偏好，必须在每次回复中遵守]\n${instruction}`
+        : "");
     const payload: AgentChatMessage[] = [
-      {
-        role: "system",
-        content:
-          mode === "agent" ? SYSTEM_PROMPT + AGENT_PROMPT_EXTRA : SYSTEM_PROMPT,
-      },
+      { role: "system", content: systemPrompt },
       ...history
         .filter(
           (e): e is MessageEntry =>
@@ -396,23 +442,39 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
         .map((e) => ({ role: e.role, content: e.content })),
     ];
 
-    try {
-      const requestId = await agentChat(provider, payload, mode, (event) =>
-        handleEvent(event, assistantEntry.id)
-      );
-      if (activeStreamRef.current?.entryId === assistantEntry.id) {
-        activeStreamRef.current.requestId = requestId;
-      } else {
-        // 等待 invoke 返回期间已被取消
-        agentCancel(requestId).catch(() => {});
+    // 瞬时错误（限流/超时/网络波动）自动重试；重试前清掉上一轮的失败文案
+    const maxRetries = aiSettings.maxRetries;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const requestId = await agentChat(
+          provider,
+          payload,
+          mode,
+          (event) => handleEvent(event, assistantEntry.id),
+          mode === "agent" ? aiSettings.maxRounds : undefined
+        );
+        if (activeStreamRef.current?.entryId === assistantEntry.id) {
+          activeStreamRef.current.requestId = requestId;
+        } else {
+          // 等待 invoke 返回期间已被取消
+          agentCancel(requestId).catch(() => {});
+        }
+        return;
+      } catch (err) {
+        const message = String(err);
+        const transient = isTransientError(message);
+        if (!transient || attempt >= maxRetries) {
+          updateMessage(assistantEntry.id, (e) => ({
+            ...e,
+            content: e.content || message,
+            error: true,
+          }));
+          finishStream();
+          return;
+        }
+        // 线性退避：第 n 次重试等 n 秒
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
       }
-    } catch (err) {
-      updateMessage(assistantEntry.id, (e) => ({
-        ...e,
-        content: e.content || String(err),
-        error: true,
-      }));
-      finishStream();
     }
   };
 
@@ -431,8 +493,8 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   };
 
   const switchMode = (next: AgentMode) => {
+    // 只切换当前会话的模式；全局默认走设置页的「默认 AI 模式」
     setMode(next);
-    saveMode(next);
   };
 
   const toggleAutoExec = () => {

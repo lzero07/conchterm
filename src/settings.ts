@@ -111,6 +111,15 @@ export interface AppSettings {
   layout: LayoutStyle;
   tabOverflow: TabOverflow;
   trayIcon: boolean;
+  // ---------- AI ----------
+  /** Agent 模式单回合最大工具调用轮数（Python 侧护栏） */
+  agentMaxRounds: number;
+  /** 遇到瞬时 AI 错误（限流/超时/网络波动）的自动重试次数 */
+  aiMaxRetries: number;
+  /** 新建 AI 对话使用的默认模式 */
+  aiDefaultMode: "chat" | "agent";
+  /** 全局自定义指令：附加到所有 AI 对话的 system prompt */
+  aiCustomInstruction: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -126,6 +135,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   layout: "modern",
   tabOverflow: "scroll",
   trayIcon: false,
+  agentMaxRounds: 30,
+  aiMaxRetries: 2,
+  aiDefaultMode: "chat",
+  aiCustomInstruction: "",
 };
 
 const STORAGE_KEY = "conchterm.settings";
@@ -149,6 +162,13 @@ function clampFontSize(value: unknown): number {
   );
 }
 
+// 整数设置校验：非法值回落默认，合法值夹到 [min, max]
+function clampInt(value: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
+}
+
 export function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -170,6 +190,13 @@ export function loadSettings(): AppSettings {
       layout: pick(merged.layout, { modern: 1, classic: 1 }, DEFAULT_SETTINGS.layout),
       tabOverflow: pick(merged.tabOverflow, { scroll: 1, wrap: 1 }, DEFAULT_SETTINGS.tabOverflow),
       trayIcon: merged.trayIcon === true,
+      agentMaxRounds: clampInt(merged.agentMaxRounds, 5, 500, DEFAULT_SETTINGS.agentMaxRounds),
+      aiMaxRetries: clampInt(merged.aiMaxRetries, 0, 10, DEFAULT_SETTINGS.aiMaxRetries),
+      aiDefaultMode: merged.aiDefaultMode === "agent" ? "agent" : "chat",
+      aiCustomInstruction:
+        typeof merged.aiCustomInstruction === "string"
+          ? merged.aiCustomInstruction
+          : "",
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

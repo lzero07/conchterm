@@ -20,12 +20,14 @@ export function agentHasKey(providerId: string): Promise<boolean> {
   return invoke("agent_has_key", { providerId });
 }
 
-/** 发起聊天；onEvent 接收流式增量，resolve 返回请求 id 用于取消 */
+/** 发起聊天；onEvent 接收流式增量，resolve 返回请求 id 用于取消。
+ *  maxRounds 透传 Python 侧 Agent 工具调用轮数上限。 */
 export function agentChat(
   provider: AgentProvider,
   messages: AgentChatMessage[],
   mode: AgentMode,
-  onEvent: (event: AgentEvent) => void
+  onEvent: (event: AgentEvent) => void,
+  maxRounds?: number
 ): Promise<string> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
@@ -38,6 +40,7 @@ export function agentChat(
     },
     messages,
     mode,
+    maxRounds: maxRounds ?? null,
     onDelta: channel,
   });
 }

@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { Info, Palette, RotateCcw, Search } from "lucide-react";
+import {
+  Bot,
+  Info,
+  Palette,
+  Plus,
+  RotateCcw,
+  Search,
+  Trash2,
+} from "lucide-react";
 import {
   COLOR_THEMES,
   DEFAULT_SETTINGS,
@@ -16,6 +24,20 @@ import {
   type ThemeMode,
   type UiFontId,
 } from "../settings";
+import ProviderForm from "../agent/ProviderForm";
+import { useDialogs } from "./Dialogs";
+import {
+  agentDeleteKey,
+  agentListModels,
+  agentSetKey,
+} from "../agent/api";
+import {
+  loadActiveProviderId,
+  loadProviders,
+  saveActiveProviderId,
+  saveProviders,
+} from "../agent/storage";
+import type { AgentProvider } from "../agent/types";
 
 interface Props {
   settings: AppSettings;
@@ -25,7 +47,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Category = "appearance" | "about";
+type Category = "appearance" | "ai" | "about";
 
 const THEME_OPTIONS: [ThemeMode, string][] = [
   ["light", "亮色"],
@@ -46,9 +68,116 @@ export default function SettingsView({
   onApplyAndClose,
   onClose,
 }: Props) {
+  const dialogs = useDialogs();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [category, setCategory] = useState<Category>("appearance");
   const [query, setQuery] = useState("");
+  // AI Provider 列表：与 Agent 面板共享同一份 localStorage 数据
+  const [providers, setProviders] = useState<AgentProvider[]>(loadProviders);
+  const [activeProviderId, setActiveProviderId] = useState<string>(
+    loadActiveProviderId
+  );
+  const [providerFormOpen, setProviderFormOpen] = useState(false);
+  const [editingProvider, setEditingProvider] = useState<AgentProvider | null>(
+    null
+  );
+  // 正在拉取模型列表的 Provider id
+  const [fetchingModelsId, setFetchingModelsId] = useState<string | null>(null);
+
+  const persistProviders = (next: AgentProvider[]) => {
+    setProviders(next);
+    saveProviders(next);
+    // 通知其它挂载点（AgentPanel）同步刷新
+    window.dispatchEvent(new CustomEvent("conchterm.providers-changed"));
+  };
+
+  const saveProvider = async (provider: AgentProvider, apiKey: string) => {
+    let saved = provider;
+    if (apiKey) {
+      try {
+        await agentSetKey(provider.id, apiKey);
+        saved = { ...provider, hasKey: true };
+      } catch (err) {
+        void dialogs.alert(`保存 API Key 失败：${String(err)}`, {
+          title: "保存失败",
+        });
+        return;
+      }
+    }
+    const exists = providers.some((p) => p.id === saved.id);
+    const next = exists
+      ? providers.map((p) => (p.id === saved.id ? saved : p))
+      : [...providers, saved];
+    persistProviders(next);
+    // 第一个 Provider 自动设为默认
+    if (!activeProviderId) {
+      setActiveProviderId(saved.id);
+      saveActiveProviderId(saved.id);
+    }
+    setProviderFormOpen(false);
+  };
+
+  const removeProvider = (provider: AgentProvider) => {
+    void dialogs
+      .confirm(`删除 Provider「${provider.name}」？`, {
+        title: "删除 Provider",
+        danger: true,
+        okLabel: "删除",
+      })
+      .then(({ ok }) => {
+        if (!ok) return;
+        const next = providers.filter((p) => p.id !== provider.id);
+        persistProviders(next);
+        agentDeleteKey(provider.id).catch(() => {});
+        if (activeProviderId === provider.id) {
+          const fallback = next[0]?.id ?? "";
+          setActiveProviderId(fallback);
+          saveActiveProviderId(fallback);
+        }
+      });
+  };
+
+  const fetchModels = (provider: AgentProvider) => {
+    if (fetchingModelsId) return;
+    setFetchingModelsId(provider.id);
+    agentListModels(provider, (event) => {
+      if (event.type === "models") {
+        const fetched = event.models ?? [];
+        if (fetched.length === 0) {
+          void dialogs.alert("该 Provider 未返回任何模型", {
+            title: "获取模型列表",
+            kind: "warning",
+          });
+        }
+        setProviders((prev) => {
+          const next = prev.map((p) =>
+            p.id !== provider.id
+              ? p
+              : {
+                  ...p,
+                  models: Array.from(new Set([...p.models, ...fetched])),
+                }
+          );
+          saveProviders(next);
+          window.dispatchEvent(new CustomEvent("conchterm.providers-changed"));
+          return next;
+        });
+        setFetchingModelsId(null);
+      } else if (event.type === "error") {
+        void dialogs.alert(`获取模型列表失败：${event.message ?? "未知错误"}`, {
+          title: "获取模型列表失败",
+          kind: "error",
+        });
+        setFetchingModelsId(null);
+      }
+    }).catch((err) => {
+      void dialogs.alert(String(err), {
+        title: "获取模型列表失败",
+        kind: "error",
+      });
+      setFetchingModelsId(null);
+    });
+  };
 
   const dirty = useMemo(
     () => JSON.stringify(draft) !== JSON.stringify(settings),
@@ -333,6 +462,13 @@ export default function SettingsView({
           外观
         </button>
         <button
+          className={`settings-nav-item${category === "ai" ? " active" : ""}`}
+          onClick={() => setCategory("ai")}
+        >
+          <Bot size={15} strokeWidth={1.8} />
+          AI
+        </button>
+        <button
           className={`settings-nav-item${category === "about" ? " active" : ""}`}
           onClick={() => setCategory("about")}
         >
@@ -360,6 +496,192 @@ export default function SettingsView({
               )}
             </div>
           </>
+        )}
+        {category === "ai" && (
+          <div className="settings-scroll">
+            {/* ---------- AI 配置列表 ---------- */}
+            <section className="settings-section">
+              <div className="ai-section-head">
+                <h4>AI 配置列表</h4>
+                <button
+                  className="ai-add-btn"
+                  onClick={() => {
+                    setEditingProvider(null);
+                    setProviderFormOpen(true);
+                  }}
+                >
+                  <Plus size={13} strokeWidth={2} />
+                  新增配置
+                </button>
+              </div>
+              {providers.length === 0 ? (
+                <p className="settings-empty">
+                  还没有 AI 配置，点击「新增配置」添加第一个 Provider
+                </p>
+              ) : (
+                <div className="ai-provider-list">
+                  {providers.map((p) => (
+                    <div
+                      key={p.id}
+                      className={`ai-provider-card${p.id === activeProviderId ? " active" : ""}`}
+                      onClick={() => {
+                        setActiveProviderId(p.id);
+                        saveActiveProviderId(p.id);
+                        window.dispatchEvent(
+                          new CustomEvent("conchterm.providers-changed")
+                        );
+                      }}
+                    >
+                      <span className="ai-provider-avatar">
+                        <Bot size={16} strokeWidth={1.8} />
+                      </span>
+                      <span className="ai-provider-main">
+                        <span className="ai-provider-name">
+                          {p.name}
+                          {p.id === activeProviderId && (
+                            <span className="ai-provider-badge">默认</span>
+                          )}
+                        </span>
+                        <span className="ai-provider-sub">
+                          {p.protocol === "anthropic" ? "Claude" : "OpenAI 兼容"}
+                          {" · "}
+                          {p.activeModel || p.defaultModel}
+                          {!p.hasKey && (
+                            <span className="ai-provider-warn">未配置 Key</span>
+                          )}
+                        </span>
+                      </span>
+                      <span className="ai-provider-actions">
+                        <button
+                          className="ghost-btn"
+                          title="拉取模型列表"
+                          disabled={fetchingModelsId !== null}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fetchModels(p);
+                          }}
+                        >
+                          {fetchingModelsId === p.id ? (
+                            <RotateCcw
+                              size={13}
+                              strokeWidth={1.8}
+                              className="spin"
+                            />
+                          ) : (
+                            <RotateCcw size={13} strokeWidth={1.8} />
+                          )}
+                        </button>
+                        <button
+                          className="ai-provider-edit"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditingProvider(p);
+                            setProviderFormOpen(true);
+                          }}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="icon-btn danger"
+                          title="删除"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeProvider(p);
+                          }}
+                        >
+                          <Trash2 size={13} strokeWidth={1.8} />
+                        </button>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* ---------- Agent 回合上限 ---------- */}
+            <section className="settings-section">
+              <h4>Agent 回合上限</h4>
+              <p className="ai-field-desc">
+                单次 API Agent
+                运行的最大工具调用回合数，超过后会暂停并提示继续。
+              </p>
+              <div className="ai-field-row">
+                <input
+                  className="ai-number-input"
+                  type="number"
+                  min={5}
+                  max={500}
+                  value={draft.agentMaxRounds}
+                  onChange={(e) =>
+                    patch({ agentMaxRounds: Number(e.target.value) })
+                  }
+                />
+                <span className="ai-field-hint">5–500，默认 30</span>
+              </div>
+            </section>
+
+            {/* ---------- 默认 AI 模式 ---------- */}
+            <section className="settings-section">
+              <h4>默认 AI 模式</h4>
+              <p className="ai-field-desc">
+                新建 AI 对话时使用的模式。切换当前对话的模式不会修改此设置。
+              </p>
+              <div className="seg-group">
+                <button
+                  className={`seg-btn${draft.aiDefaultMode === "chat" ? " active" : ""}`}
+                  onClick={() => patch({ aiDefaultMode: "chat" })}
+                >
+                  Ask
+                </button>
+                <button
+                  className={`seg-btn${draft.aiDefaultMode === "agent" ? " active" : ""}`}
+                  onClick={() => patch({ aiDefaultMode: "agent" })}
+                >
+                  Agent
+                </button>
+              </div>
+            </section>
+
+            {/* ---------- 最大重试次数 ---------- */}
+            <section className="settings-section">
+              <h4>最大重试次数</h4>
+              <p className="ai-field-desc">
+                遇到瞬时 AI
+                错误（限流、超时、网络波动）时的自动重试次数。适用于所有 API
+                模式 AI 供应商。
+              </p>
+              <div className="ai-field-row">
+                <input
+                  className="ai-number-input"
+                  type="number"
+                  min={0}
+                  max={10}
+                  value={draft.aiMaxRetries}
+                  onChange={(e) =>
+                    patch({ aiMaxRetries: Number(e.target.value) })
+                  }
+                />
+                <span className="ai-field-hint">0–10，默认 2</span>
+              </div>
+            </section>
+
+            {/* ---------- 全局自定义指令 ---------- */}
+            <section className="settings-section">
+              <h4>全局自定义指令</h4>
+              <p className="ai-field-desc">
+                所有 AI 对话自动应用的系统指令，如回答风格、语言偏好等。
+              </p>
+              <textarea
+                className="ai-instruction-input"
+                rows={4}
+                value={draft.aiCustomInstruction}
+                placeholder="例：回答使用中文；优先给出可直接执行的命令；解释保持简短。"
+                onChange={(e) =>
+                  patch({ aiCustomInstruction: e.target.value })
+                }
+              />
+            </section>
+          </div>
         )}
         {category === "about" && (
           <div className="settings-scroll">
@@ -394,6 +716,14 @@ export default function SettingsView({
           </button>
         </div>
       </div>
+
+      {providerFormOpen && (
+        <ProviderForm
+          initial={editingProvider}
+          onCancel={() => setProviderFormOpen(false)}
+          onSave={saveProvider}
+        />
+      )}
     </div>
   );
 }

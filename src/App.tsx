@@ -600,6 +600,12 @@ function AppShell() {
                   ? activeKey
                   : null
               }
+              aiSettings={{
+                maxRounds: effectiveSettings.agentMaxRounds,
+                maxRetries: effectiveSettings.aiMaxRetries,
+                defaultMode: effectiveSettings.aiDefaultMode,
+                customInstruction: effectiveSettings.aiCustomInstruction,
+              }}
             />
           </aside>
         </>

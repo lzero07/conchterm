@@ -334,6 +334,7 @@ pub async fn agent_chat(
     provider: AgentProviderInput,
     messages: Vec<AgentChatMessage>,
     mode: Option<String>,
+    max_rounds: Option<u32>,
     on_delta: Channel<AgentEvent>,
 ) -> Result<String, String> {
     let api_key = read_api_key(&provider.id)?;
@@ -353,6 +354,7 @@ pub async fn agent_chat(
         "type": "chat",
         "id": request_id,
         "mode": mode.unwrap_or_else(|| "chat".into()),
+        "max_rounds": max_rounds,
         "provider": {
             "protocol": provider.protocol,
             "base_url": provider.base_url,
