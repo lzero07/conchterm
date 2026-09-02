@@ -85,6 +85,11 @@ export const TERMINAL_FONTS: Record<TerminalFontId, { name: string; stack: strin
 
 export const ZOOM_OPTIONS = [80, 90, 100, 110, 125, 150];
 
+// 终端字号允许的范围（px），Ctrl+滚轮缩放同样被夹在此区间
+export const TERMINAL_FONT_SIZE_MIN = 10;
+export const TERMINAL_FONT_SIZE_MAX = 24;
+export const TERMINAL_FONT_SIZE_DEFAULT = 14;
+
 export const RADII: Record<RadiusStyle, string> = {
   none: "0px",
   small: "5px",
@@ -97,6 +102,10 @@ export interface AppSettings {
   zoom: number;
   uiFont: UiFontId;
   terminalFont: TerminalFontId;
+  /** 终端基础字号（px），Ctrl+滚轮可临时调整 */
+  terminalFontSize: number;
+  /** Ctrl+滚轮缩放终端字体 */
+  ctrlWheelZoom: boolean;
   themeMode: ThemeMode;
   radius: RadiusStyle;
   layout: LayoutStyle;
@@ -110,6 +119,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   zoom: 100,
   uiFont: "system",
   terminalFont: "consolas",
+  terminalFontSize: TERMINAL_FONT_SIZE_DEFAULT,
+  ctrlWheelZoom: true,
   themeMode: "dark",
   radius: "small",
   layout: "modern",
@@ -128,6 +139,16 @@ function pick<T extends string>(
   return typeof value === "string" && value in record ? (value as T) : fallback;
 }
 
+// 终端字号校验：非数字或超出范围时夹到合法区间
+function clampFontSize(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return TERMINAL_FONT_SIZE_DEFAULT;
+  return Math.min(
+    TERMINAL_FONT_SIZE_MAX,
+    Math.max(TERMINAL_FONT_SIZE_MIN, Math.round(n))
+  );
+}
+
 export function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -142,6 +163,8 @@ export function loadSettings(): AppSettings {
         : DEFAULT_SETTINGS.zoom,
       uiFont: pick(merged.uiFont, UI_FONTS, DEFAULT_SETTINGS.uiFont),
       terminalFont: pick(merged.terminalFont, TERMINAL_FONTS, DEFAULT_SETTINGS.terminalFont),
+      terminalFontSize: clampFontSize(merged.terminalFontSize),
+      ctrlWheelZoom: merged.ctrlWheelZoom !== false,
       themeMode: pick(merged.themeMode, { light: 1, dark: 1, system: 1 }, DEFAULT_SETTINGS.themeMode),
       radius: pick(merged.radius, RADII, DEFAULT_SETTINGS.radius),
       layout: pick(merged.layout, { modern: 1, classic: 1 }, DEFAULT_SETTINGS.layout),

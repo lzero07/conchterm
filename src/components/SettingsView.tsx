@@ -4,6 +4,8 @@ import {
   COLOR_THEMES,
   DEFAULT_SETTINGS,
   TERMINAL_FONTS,
+  TERMINAL_FONT_SIZE_MAX,
+  TERMINAL_FONT_SIZE_MIN,
   UI_FONTS,
   ZOOM_OPTIONS,
   type AppSettings,
@@ -129,39 +131,74 @@ export default function SettingsView({
     },
     {
       key: "fonts",
-      hit: visible(["字体", "font"]),
+      hit: visible(["字体", "font", "字号", "缩放", "滚轮"]),
       node: (
-        <div className="settings-grid" key="fonts">
-          <label className="settings-field">
-            <span>界面字体</span>
-            <select
-              value={draft.uiFont}
-              onChange={(e) =>
-                patch({ uiFont: e.target.value as UiFontId })
-              }
+        <div key="fonts">
+          <div className="settings-grid">
+            <label className="settings-field">
+              <span>界面字体</span>
+              <select
+                value={draft.uiFont}
+                onChange={(e) =>
+                  patch({ uiFont: e.target.value as UiFontId })
+                }
+              >
+                {Object.entries(UI_FONTS).map(([id, f]) => (
+                  <option key={id} value={id}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="settings-field">
+              <span>终端字体</span>
+              <select
+                value={draft.terminalFont}
+                onChange={(e) =>
+                  patch({ terminalFont: e.target.value as TerminalFontId })
+                }
+              >
+                {Object.entries(TERMINAL_FONTS).map(([id, f]) => (
+                  <option key={id} value={id}>
+                    {f.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="settings-grid">
+            <label className="settings-field">
+              <span>终端字号（{draft.terminalFontSize}px）</span>
+              <input
+                type="range"
+                min={TERMINAL_FONT_SIZE_MIN}
+                max={TERMINAL_FONT_SIZE_MAX}
+                step={1}
+                value={draft.terminalFontSize}
+                onChange={(e) =>
+                  patch({ terminalFontSize: Number(e.target.value) })
+                }
+              />
+            </label>
+          </div>
+          <section className="settings-section">
+            <button
+              className={`toggle-row${draft.ctrlWheelZoom ? " on" : ""}`}
+              role="switch"
+              aria-checked={draft.ctrlWheelZoom}
+              onClick={() => patch({ ctrlWheelZoom: !draft.ctrlWheelZoom })}
             >
-              {Object.entries(UI_FONTS).map(([id, f]) => (
-                <option key={id} value={id}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="settings-field">
-            <span>终端字体</span>
-            <select
-              value={draft.terminalFont}
-              onChange={(e) =>
-                patch({ terminalFont: e.target.value as TerminalFontId })
-              }
-            >
-              {Object.entries(TERMINAL_FONTS).map(([id, f]) => (
-                <option key={id} value={id}>
-                  {f.name}
-                </option>
-              ))}
-            </select>
-          </label>
+              <span className="toggle-text">
+                <span className="option-title">Ctrl + 滚轮缩放终端字体</span>
+                <span className="option-desc">
+                  在终端上按住 Ctrl 并滚动滚轮，可临时调整该标签页的字体大小（不改动上面的默认字号）。
+                </span>
+              </span>
+              <span className="switch">
+                <span className="knob" />
+              </span>
+            </button>
+          </section>
         </div>
       ),
     },

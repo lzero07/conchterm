@@ -8,16 +8,23 @@ import {
   sshWrite,
   type ConnectParams,
 } from "../api";
+import {
+  TERMINAL_FONT_SIZE_MAX,
+  TERMINAL_FONT_SIZE_MIN,
+} from "../settings";
 
 interface Props {
   sessionKey: string;
   params: ConnectParams;
   appearance: TerminalAppearance;
+  /** 允许 Ctrl+滚轮临时缩放本终端字体（设置里可关） */
+  ctrlWheelZoom: boolean;
   onStatus?: (status: "connected" | "failed") => void;
 }
 
 export interface TerminalAppearance {
   fontFamily: string;
+  fontSize: number;
   theme: "light" | "dark";
   accent: string;
   selection: string;
@@ -86,17 +93,28 @@ export default function TerminalView({
   sessionKey,
   params,
   appearance,
+  ctrlWheelZoom,
   onStatus,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Ctrl+滚轮产生的临时字号偏移（相对设置里的基础字号），仅在当前会话内生效
+  const zoomOffsetRef = useRef(0);
+  const baseFontSizeRef = useRef(appearance.fontSize);
+  // 设置开关的实时值，滚轮监听器只注册一次、按此判断是否生效
+  const ctrlWheelZoomRef = useRef(ctrlWheelZoom);
+  ctrlWheelZoomRef.current = ctrlWheelZoom;
 
-  // 设置面板里改字体/主题时，原地更新已存在的终端实例
+  // 设置面板里改字体/主题/字号时，原地更新已存在的终端实例
   useEffect(() => {
+    baseFontSizeRef.current = appearance.fontSize;
+    // 字号设置变化时重置滚轮缩放偏移，让新字号立即生效
+    zoomOffsetRef.current = 0;
     const term = termRef.current;
     if (!term) return;
     term.options.fontFamily = appearance.fontFamily;
+    term.options.fontSize = appearance.fontSize;
     term.options.theme = termTheme(appearance);
     try {
       fitRef.current?.fit();
@@ -110,7 +128,7 @@ export default function TerminalView({
 
     const term = new Terminal({
       fontFamily: appearance.fontFamily,
-      fontSize: 14,
+      fontSize: appearance.fontSize,
       cursorBlink: true,
       scrollback: 5000,
       theme: termTheme(appearance),
@@ -195,12 +213,41 @@ export default function TerminalView({
         onStatus?.("failed");
       });
 
+    // Ctrl+滚轮缩放当前终端字体：只影响本标签页，不写全局设置
+    const wheelHandler = (e: WheelEvent) => {
+      if (!e.ctrlKey || !ctrlWheelZoomRef.current) return;
+      e.preventDefault();
+      const term = termRef.current;
+      const fit = fitRef.current;
+      if (!term || !fit) return;
+      const step = e.deltaY < 0 ? 1 : -1;
+      const next = Math.min(
+        TERMINAL_FONT_SIZE_MAX,
+        Math.max(
+          TERMINAL_FONT_SIZE_MIN,
+          baseFontSizeRef.current + zoomOffsetRef.current + step
+        )
+      );
+      if (next === term.options.fontSize) return;
+      zoomOffsetRef.current = next - baseFontSizeRef.current;
+      term.options.fontSize = next;
+      try {
+        fit.fit();
+        sshResize(sessionKey, term.cols, term.rows);
+      } catch {
+        // 容器尺寸为 0 时忽略
+      }
+    };
+    const container = containerRef.current;
+    container.addEventListener("wheel", wheelHandler, { passive: false });
+
     const inputHandler = term.onData((d) => {
       sshWrite(sessionKey, new TextEncoder().encode(d));
     });
 
     return () => {
       disposed = true;
+      container.removeEventListener("wheel", wheelHandler);
       inputHandler.dispose();
       resizeObserver.disconnect();
       import("../api").then(({ sshDisconnect }) =>

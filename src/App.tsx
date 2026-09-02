@@ -53,6 +53,7 @@ type SessionStatus = "connected" | "failed";
 
 interface TerminalAppearance {
   fontFamily: string;
+  fontSize: number;
   theme: "light" | "dark";
   accent: string;
   selection: string;
@@ -171,6 +172,7 @@ function AppShell() {
       fontFamily:
         TERMINAL_FONTS[effectiveSettings.terminalFont]?.stack ??
         TERMINAL_FONTS.consolas.stack,
+      fontSize: effectiveSettings.terminalFontSize,
       theme: resolveTheme(effectiveSettings.themeMode),
       accent: theme.accent,
       selection: theme.selection,
@@ -179,6 +181,7 @@ function AppShell() {
     effectiveSettings.colorTheme,
     effectiveSettings.themeMode,
     effectiveSettings.terminalFont,
+    effectiveSettings.terminalFontSize,
   ]);
 
   const applySettings = (next: AppSettings) => {
@@ -336,6 +339,7 @@ function AppShell() {
             sessionKey={t.key}
             params={t.params}
             appearance={terminalAppearance}
+            ctrlWheelZoom={effectiveSettings.ctrlWheelZoom}
             onStatus={(status) =>
               setSessionStatus((prev) => ({ ...prev, [t.key]: status }))
             }
