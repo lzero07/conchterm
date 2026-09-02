@@ -19,6 +19,7 @@ import TerminalView from "./components/TerminalView";
 import ServerForm from "./components/ServerForm";
 import FileBrowser from "./components/FileBrowser";
 import SettingsView from "./components/SettingsView";
+import { DialogProvider, useDialogs } from "./components/Dialogs";
 import AgentPanel from "./agent/AgentPanel";
 import {
   applyAppearance,
@@ -63,6 +64,15 @@ const AGENT_DOCK_WIDTH_KEY = "agentDockWidth";
 const AGENT_DOCK_OPEN_KEY = "agentDockOpen";
 
 export default function App() {
+  return (
+    <DialogProvider>
+      <AppShell />
+    </DialogProvider>
+  );
+}
+
+function AppShell() {
+  const dialogs = useDialogs();
   const [servers, setServers] = useState<ServerProfile[]>(loadServers);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -446,9 +456,17 @@ export default function App() {
                         title="删除"
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (confirm(`删除服务器「${s.name}」？`)) {
-                            persist(servers.filter((x) => x.id !== s.id));
-                          }
+                          void dialogs
+                            .confirm(`删除服务器「${s.name}」？`, {
+                              title: "删除服务器",
+                              danger: true,
+                              okLabel: "删除",
+                            })
+                            .then(({ ok }) => {
+                              if (ok) {
+                                persist(servers.filter((x) => x.id !== s.id));
+                              }
+                            });
                         }}
                       >
                         <Trash2 size={13} strokeWidth={1.8} />

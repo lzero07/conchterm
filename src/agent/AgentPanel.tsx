@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import ProviderForm from "./ProviderForm";
+import { useDialogs } from "../components/Dialogs";
 import { sshExec } from "../api";
 import {
   agentCancel,
@@ -104,6 +105,7 @@ function formatTime(ts: number): string {
 
 /** AI 助手面板：会话管理 / 问答与 Agent 双模式 / 流式聊天 / 命令确认 */
 export default function AgentPanel({ sessions, activeTerminalId }: Props) {
+  const dialogs = useDialogs();
   const [providers, setProviders] = useState<AgentProvider[]>(loadProviders);
   const [activeId, setActiveId] = useState<string>(loadActiveProviderId);
   const [mode, setMode] = useState<AgentMode>(loadMode);
@@ -502,24 +504,35 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   };
 
   const removeSession = (id: string) => {
-    if (!confirm("删除当前会话及其聊天记录？")) return;
-    stop();
-    deleteSessionEntries(id);
-    const rest = sessionIndex.sessions.filter((s) => s.id !== id);
-    if (rest.length === 0) {
-      const meta = newSessionMeta();
-      const next: AgentSessionIndex = { sessions: [meta], activeId: meta.id };
-      setSessionIndex(next);
-      saveSessionIndex(next);
-      return;
-    }
-    const nextActive =
-      id === activeSessionId
-        ? [...rest].sort((a, b) => b.updatedAt - a.updatedAt)[0].id
-        : activeSessionId;
-    const next: AgentSessionIndex = { sessions: rest, activeId: nextActive };
-    setSessionIndex(next);
-    saveSessionIndex(next);
+    void dialogs
+      .confirm("删除当前会话及其聊天记录？", {
+        title: "删除会话",
+        danger: true,
+        okLabel: "删除",
+      })
+      .then(({ ok }) => {
+        if (!ok) return;
+        stop();
+        deleteSessionEntries(id);
+        const rest = sessionIndex.sessions.filter((s) => s.id !== id);
+        if (rest.length === 0) {
+          const meta = newSessionMeta();
+          const next: AgentSessionIndex = {
+            sessions: [meta],
+            activeId: meta.id,
+          };
+          setSessionIndex(next);
+          saveSessionIndex(next);
+          return;
+        }
+        const nextActive =
+          id === activeSessionId
+            ? [...rest].sort((a, b) => b.updatedAt - a.updatedAt)[0].id
+            : activeSessionId;
+        const next: AgentSessionIndex = { sessions: rest, activeId: nextActive };
+        setSessionIndex(next);
+        saveSessionIndex(next);
+      });
   };
 
   /** 执行工具：需确认时由批准按钮触发，自动放行时由 tool_call 事件触发 */
@@ -572,14 +585,22 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
   };
 
   const removeProvider = (provider: AgentProvider) => {
-    if (!confirm(`删除 Provider「${provider.name}」？`)) return;
-    const next = providers.filter((p) => p.id !== provider.id);
-    persistProviders(next);
-    agentDeleteKey(provider.id).catch(() => {});
-    if (activeId === provider.id) {
-      const fallback = next[0]?.id ?? "";
-      changeProvider(fallback);
-    }
+    void dialogs
+      .confirm(`删除 Provider「${provider.name}」？`, {
+        title: "删除 Provider",
+        danger: true,
+        okLabel: "删除",
+      })
+      .then(({ ok }) => {
+        if (!ok) return;
+        const next = providers.filter((p) => p.id !== provider.id);
+        persistProviders(next);
+        agentDeleteKey(provider.id).catch(() => {});
+        if (activeId === provider.id) {
+          const fallback = next[0]?.id ?? "";
+          changeProvider(fallback);
+        }
+      });
   };
 
   const saveProvider = async (provider: AgentProvider, apiKey: string) => {
@@ -589,7 +610,9 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
         await agentSetKey(provider.id, apiKey);
         saved = { ...provider, hasKey: true };
       } catch (err) {
-        alert(`保存 API Key 失败：${String(err)}`);
+        void dialogs.alert(`保存 API Key 失败：${String(err)}`, {
+          title: "保存失败",
+        });
         return;
       }
     }
@@ -622,7 +645,10 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
       if (event.type === "models") {
         const fetched = event.models ?? [];
         if (fetched.length === 0) {
-          alert("该 Provider 未返回任何模型");
+          void dialogs.alert("该 Provider 未返回任何模型", {
+            title: "获取模型列表",
+            kind: "warning",
+          });
         }
         setProviders((prev) =>
           prev.map((p) => {
@@ -633,11 +659,14 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
         );
         setFetchingModels(false);
       } else if (event.type === "error") {
-        alert(`获取模型列表失败：${event.message ?? "未知错误"}`);
+        void dialogs.alert(`获取模型列表失败：${event.message ?? "未知错误"}`, {
+          title: "获取模型列表失败",
+          kind: "error",
+        });
         setFetchingModels(false);
       }
     }).catch((err) => {
-      alert(String(err));
+      void dialogs.alert(String(err), { title: "获取模型列表失败", kind: "error" });
       setFetchingModels(false);
     });
   };

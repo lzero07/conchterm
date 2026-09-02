@@ -1360,6 +1360,70 @@ button.primary.danger:hover {
   user-select: text;
 }
 
+/* ===== 应用内统一弹窗（alert/confirm/prompt）===== */
+.dialog-modal { width: 380px; }
+.dialog-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.dialog-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  margin-top: 1px;
+  border-radius: 50%;
+}
+.dialog-icon svg { display: block; }
+.dialog-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--text-0);
+  word-break: break-word;
+  user-select: text;
+  white-space: pre-wrap;
+}
+.dialog-input {
+  display: block;
+  width: 100%;
+  margin-bottom: 14px;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-0);
+  background: var(--bg-0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+.dialog-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.dialog-body.info .dialog-icon {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.dialog-body.success .dialog-icon {
+  background: rgba(62, 207, 142, .14);
+  color: var(--green);
+}
+.dialog-body.warning .dialog-icon {
+  background: rgba(240, 185, 90, .14);
+  color: var(--amber);
+}
+.dialog-body.error .dialog-icon {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.dialog-body.error .dialog-text { color: var(--danger); }
+
 /* xterm 内文字可选中 */
 .terminal-container .xterm { user-select: text; }
 

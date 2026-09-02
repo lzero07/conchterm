@@ -12,8 +12,8 @@ import {
   Upload,
   Trash2,
 } from "lucide-react";
+import { useDialogs } from "./Dialogs";
 import {
-  confirm as confirmDialog,
   open as openFileDialog,
   save as saveFileDialog,
 } from "@tauri-apps/plugin-dialog";
@@ -88,6 +88,7 @@ function textWidth(s: string): number {
 
 /** 远端文件浏览器（连接成功后可用），路径面包屑 + 列表视图 */
 export default function FileBrowser({ sessionId }: Props) {
+  const dialogs = useDialogs();
   const [path, setPath] = useState("/root");
   const [files, setFiles] = useState<RemoteFile[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -288,11 +289,18 @@ export default function FileBrowser({ sessionId }: Props) {
     setRenaming(null);
   };
 
-  const removeFile = async (f: RemoteFile) => {
-    if (confirm(`确定删除 ${f.name} 吗？`)) {
-      await sftpRemove(sessionId, fullPath(f.name), f.isDir);
-      refresh(path);
-    }
+  const removeFile = (f: RemoteFile) => {
+    void dialogs
+      .confirm(`确定删除 ${f.name} 吗？`, {
+        title: "删除文件",
+        danger: true,
+        okLabel: "删除",
+      })
+      .then(async ({ ok }) => {
+        if (!ok) return;
+        await sftpRemove(sessionId, fullPath(f.name), f.isDir);
+        refresh(path);
+      });
   };
 
   const copyPath = async (f: RemoteFile) => {
@@ -325,7 +333,7 @@ export default function FileBrowser({ sessionId }: Props) {
       }
     }
     if (conflicts.length) {
-      const overwrite = await confirmDialog(
+      const { ok: overwrite } = await dialogs.confirm(
         conflicts.length === 1
           ? `「${conflicts[0]}」已存在，是否覆盖？`
           : `发现 ${conflicts.length} 个同名文件/文件夹，是否全部覆盖？`,
@@ -513,12 +521,22 @@ export default function FileBrowser({ sessionId }: Props) {
         <button
           className="ghost-btn"
           title="新建目录"
-          onClick={async () => {
-            const name = prompt("新目录名：");
-            if (name) {
-              await sftpMkdir(sessionId, path === "/" ? `/${name}` : `${path}/${name}`);
-              refresh(path);
-            }
+          onClick={() => {
+            void dialogs
+              .prompt("新目录名：", {
+                title: "新建目录",
+                placeholder: "如：logs",
+                okLabel: "创建",
+              })
+              .then(async ({ value }) => {
+                if (value) {
+                  await sftpMkdir(
+                    sessionId,
+                    path === "/" ? `/${value}` : `${path}/${value}`
+                  );
+                  refresh(path);
+                }
+              });
           }}
         >
           <FolderPlus size={13} strokeWidth={1.8} />
