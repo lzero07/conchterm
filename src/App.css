@@ -966,6 +966,42 @@ td.dir .file-icon { color: var(--amber); }
 }
 .modal textarea { resize: vertical; font-family: Consolas, monospace; line-height: 1.5; }
 
+/* API 地址 + 检测按钮组合行 */
+.probe-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+}
+.probe-row input {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  margin-top: 0;
+}
+.probe-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: none;
+  padding: 0 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.probe-btn:disabled { opacity: .45; cursor: not-allowed; }
+/* 检测结果内联状态行：成功绿 / 失败红 / 警告黄 */
+.probe-status {
+  display: block;
+  margin-top: 5px;
+  font-size: 11px;
+  line-height: 1.55;
+  word-break: break-all;
+}
+.probe-status.success { color: var(--green); }
+.probe-status.error { color: var(--danger); }
+.probe-status.warning { color: var(--amber); }
+
 .form-row { display: flex; gap: 10px; }
 .form-row .grow { flex: 1; }
 

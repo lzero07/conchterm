@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { X } from "lucide-react";
-import type { AgentProtocol, AgentProvider } from "./types";
+import { LoaderCircle, PlugZap, X } from "lucide-react";
+import { agentListModels } from "./api";
+import type { AgentEvent, AgentProtocol, AgentProvider } from "./types";
 
 interface Props {
   initial?: AgentProvider | null;
@@ -41,6 +42,12 @@ export default function ProviderForm({ initial, onSave, onCancel }: Props) {
     initial?.models.join("\n") ?? ""
   );
   const [apiKey, setApiKey] = useState("");
+  const [probing, setProbing] = useState(false);
+  /** 检测结果行：输入框下方的内联状态文字（成功绿/失败红） */
+  const [probeStatus, setProbeStatus] = useState<{
+    kind: "success" | "warning" | "error";
+    text: string;
+  } | null>(null);
 
   // 切换协议时若地址还是另一个协议的默认值，自动跟随
   const changeProtocol = (next: AgentProtocol) => {
@@ -48,6 +55,70 @@ export default function ProviderForm({ initial, onSave, onCancel }: Props) {
       setBaseUrl(PROTOCOL_META[next].baseUrl);
     }
     setProtocol(next);
+  };
+
+  /** 检测：按当前表单的协议/地址（和输入中的 Key）拉取模型列表并回填 */
+  const probeModels = () => {
+    const url = baseUrl.trim().replace(/\/+$/, "");
+    if (!url || probing) return;
+    setProbing(true);
+    setProbeStatus(null);
+    agentListModels(
+      {
+        id: initial?.id ?? "probe",
+        name: name.trim() || "probe",
+        protocol,
+        baseUrl: url,
+        defaultModel: defaultModel.trim(),
+        models: [],
+        activeModel: "",
+        hasKey: false,
+        createdAt: 0,
+      },
+      (event: AgentEvent) => {
+        if (event.type === "models") {
+          const fetched = event.models ?? [];
+          setProbing(false);
+          if (fetched.length === 0) {
+            setProbeStatus({
+              kind: "warning",
+              text: "服务可达，但未返回任何模型，请确认模型服务已部署",
+            });
+            return;
+          }
+          // 与已有列表去重合并后回填
+          const existing = modelsText
+            .split(/[\n,]/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const existingSet = new Set(existing);
+          const fresh = fetched.filter((m) => !existingSet.has(m));
+          setModelsText(Array.from(new Set([...existing, ...fetched])).join("\n"));
+          let filledDefault = false;
+          if (!defaultModel.trim()) {
+            setDefaultModel(fetched[0]);
+            filledDefault = true;
+          }
+          setProbeStatus({
+            kind: "success",
+            text:
+              fresh.length > 0
+                ? `检测成功，新增 ${fresh.length} 个模型并已回填${filledDefault ? "，已自动填充默认模型" : ""}`
+                : `检测成功，服务返回 ${fetched.length} 个模型，均已存在列表中${filledDefault ? "，已自动填充默认模型" : ""}`,
+          });
+        } else if (event.type === "error") {
+          setProbing(false);
+          setProbeStatus({
+            kind: "error",
+            text: `检测失败：${event.message ?? "未知错误"}`,
+          });
+        }
+      },
+      apiKey.trim() || undefined
+    ).catch((err) => {
+      setProbing(false);
+      setProbeStatus({ kind: "error", text: `检测失败：${String(err)}` });
+    });
   };
 
   // 模型列表选填：留空时以默认模型建列表，也可稍后在对话框中在线获取
@@ -86,11 +157,37 @@ export default function ProviderForm({ initial, onSave, onCancel }: Props) {
         </label>
         <label>
           API 地址
-          <input
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder={PROTOCOL_META[protocol].baseUrlPlaceholder}
-          />
+          <span className="probe-row">
+            <input
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              placeholder={PROTOCOL_META[protocol].baseUrlPlaceholder}
+            />
+            <button
+              type="button"
+              className="probe-btn"
+              title="检测：连接该地址拉取可用模型列表并回填"
+              disabled={probing || !baseUrl.trim()}
+              onClick={probeModels}
+            >
+              {probing ? (
+                <>
+                  <LoaderCircle size={12} strokeWidth={2} className="spin" />
+                  检测中
+                </>
+              ) : (
+                <>
+                  <PlugZap size={12} strokeWidth={2} />
+                  检测
+                </>
+              )}
+            </button>
+          </span>
+          {probeStatus && (
+            <span className={`probe-status ${probeStatus.kind}`}>
+              {probeStatus.text}
+            </span>
+          )}
         </label>
         <label>
           默认模型

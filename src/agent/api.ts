@@ -45,11 +45,12 @@ export function agentChat(
   });
 }
 
-/** 把（已确认执行的）工具结果回传给 Python，唤醒 agent 循环 */
-/** 拉取 Provider 可用模型列表（经 Python sidecar 调 /models 接口） */
+/** 拉取 Provider 可用模型列表（经 Python sidecar 调 /models 接口）。
+ *  apiKeyOverride：编辑表单里尚未保存的 Key，优先于凭据管理器中已存的。 */
 export function agentListModels(
   provider: AgentProvider,
-  onEvent: (event: AgentEvent) => void
+  onEvent: (event: AgentEvent) => void,
+  apiKeyOverride?: string
 ): Promise<string> {
   const channel = new Channel<AgentEvent>();
   channel.onmessage = onEvent;
@@ -59,6 +60,7 @@ export function agentListModels(
       protocol: provider.protocol,
       baseUrl: provider.baseUrl,
       model: provider.defaultModel,
+      overrideApiKey: apiKeyOverride ?? null,
     },
     onEvent: channel,
   });

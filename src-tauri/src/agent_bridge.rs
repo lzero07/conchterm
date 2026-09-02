@@ -24,7 +24,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-/// 前端传来的 Provider 配置（不含 API Key）
+/// 前端传来的 Provider 配置（不含 API Key；检测接口例外，见 override_api_key）
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentProviderInput {
@@ -32,6 +32,9 @@ pub struct AgentProviderInput {
     pub protocol: String,
     pub base_url: String,
     pub model: String,
+    /// 仅检测用：Provider 尚未保存时，前端直接带上表单里输入的 Key
+    #[serde(default)]
+    pub override_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -435,7 +438,11 @@ pub async fn agent_list_models(
     provider: AgentProviderInput,
     on_event: Channel<AgentEvent>,
 ) -> Result<String, String> {
-    let api_key = read_api_key(&provider.id)?;
+    // 优先用前端直接带来的 Key（编辑表单里尚未保存的输入值），否则读凭据管理器
+    let api_key = match provider.override_api_key {
+        Some(key) if !key.trim().is_empty() => key.trim().to_string(),
+        _ => read_api_key(&provider.id)?,
+    };
 
     // 冷启动保护：sidecar 未运行时先拉起
     let process = state.process.clone();
