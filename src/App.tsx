@@ -14,6 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import TerminalView from "./components/TerminalView";
 import ServerForm from "./components/ServerForm";
@@ -120,6 +121,26 @@ function AppShell() {
     return () => unlisten?.();
   }, []);
 
+  // 远端断开：把对应终端标记为 failed（侧栏红点、Agent 不再可用）
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void listen<{ sessionId: string }>("session-closed", (event) => {
+      setSessionStatus((prev) =>
+        prev[event.payload.sessionId] === "connected"
+          ? { ...prev, [event.payload.sessionId]: "failed" }
+          : prev
+      );
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // 外观设置即时生效的统一入口：提交与预览共用
   const applySideEffects = useCallback((s: AppSettings) => {
     applyAppearance(s);
@@ -196,11 +217,16 @@ function AppShell() {
   };
 
   const openTerminal = (server: ServerProfile) => {
-    // 同一台服务器只开一个 Tab，重复点击聚焦已有 Tab
+    // 同一台服务器只开一个 Tab，重复点击聚焦已有 Tab；
+    // 但连接失败的 Tab 点击视为重连：关掉旧终端重建连接
     const existing = tabs.find((t) => t.serverId === server.id);
     if (existing) {
-      setActiveKey(existing.key);
-      return;
+      if (sessionStatus[existing.key] !== "failed") {
+        setActiveKey(existing.key);
+        return;
+      }
+      // 旧 key 的会话已死，先清理再以新 key 重建，触发 TerminalView 重新挂载
+      closeTerminal(existing.key);
     }
     const key = newId();
     const params: ConnectParams = {
@@ -561,8 +587,15 @@ function AppShell() {
           />
           <aside className="agent-dock" style={{ width: agentDockWidth }}>
             <AgentPanel
-              sessions={tabs.map((t) => ({ id: t.key, title: t.title }))}
-              activeTerminalId={activeKey}
+              // 仅暴露连接成功的终端会话：连接失败的标签不允许 Agent 执行命令
+              sessions={tabs
+                .filter((t) => sessionStatus[t.key] === "connected")
+                .map((t) => ({ id: t.key, title: t.title }))}
+              activeTerminalId={
+                activeKey && sessionStatus[activeKey] === "connected"
+                  ? activeKey
+                  : null
+              }
             />
           </aside>
         </>

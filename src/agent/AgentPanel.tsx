@@ -199,6 +199,14 @@ export default function AgentPanel({ sessions, activeTerminalId }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTerminalId]);
 
+  // 目标会话已断开（不在可用列表里）时清空选择，避免向死会话发命令
+  useEffect(() => {
+    if (targetSessionId && !sessions.some((s) => s.id === targetSessionId)) {
+      setTargetSessionId("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions]);
+
   // 没有任何会话时自动创建一个
   useEffect(() => {
     if (!sessionIndex.sessions.length) {

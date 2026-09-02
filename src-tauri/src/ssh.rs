@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use russh::client::{self, Handler};
@@ -116,6 +117,8 @@ pub struct SshSession {
     gen: u32,
     /// 终端通道的写半部：键盘输入、窗口 resize 都走这里
     channel_writer: ChannelWriteHalf<russh::client::Msg>,
+    /// 终端通道已关闭（远端退出/连接断开）：置位后拒绝 Agent 在此会话上执行命令
+    terminated: Arc<AtomicBool>,
     /// SFTP 独立连接（懒加载）
     sftp: Mutex<Option<Arc<SftpClient>>>,
 }
@@ -134,12 +137,40 @@ impl SshSession {
 /// 全局会话表：session_id -> 会话实例
 pub struct SessionMap(pub Mutex<HashMap<String, Arc<SshSession>>>);
 
+/// 远端断开时通知前端的句柄：仅当会话表仍指向本连接
+/// （未被新连接顶替、未被用户主动断开）时才发事件，避免误报
+struct SessionCloseNotify {
+    app: tauri::AppHandle,
+    session: Arc<SshSession>,
+}
+
+impl SessionCloseNotify {
+    async fn emit(&self) {
+        use tauri::{Emitter, Manager};
+        let sessions = self.app.state::<SessionMap>();
+        let is_current = sessions
+            .0
+            .lock()
+            .await
+            .get(&self.session.params.id)
+            .map(|s| Arc::ptr_eq(s, &self.session))
+            .unwrap_or(false);
+        if is_current {
+            let _ = self.app.emit(
+                "session-closed",
+                serde_json::json!({ "sessionId": self.session.params.id }),
+            );
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn ssh_connect(
     params: ConnectParams,
     gen: u32,
     on_output: Channel<Vec<u8>>,
     sessions: State<'_, SessionMap>,
+    app: tauri::AppHandle,
 ) -> Result<ConnectResult, String> {
     let handler = ClientHandler;
 
@@ -175,32 +206,9 @@ pub async fn ssh_connect(
     // 拆分读写半部：读半部给后台输出任务，写半部存会话供输入/resize 用
     let (mut read_half, channel_writer) = channel.split();
 
-    // 后台任务：把远端输出持续推给前端
-    tokio::spawn(async move {
-        loop {
-            match read_half.wait().await {
-                Some(russh::ChannelMsg::Data { ref data })
-                    if on_output.send(data.to_vec()).is_err() =>
-                {
-                    break; // 前端已关闭
-                }
-                Some(russh::ChannelMsg::ExtendedData { ref data, ext: 1 }) => {
-                    // stderr 也并入终端显示
-                    let _ = on_output.send(data.to_vec());
-                }
-                Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
-                    let msg = format!("\r\n[进程退出，状态码 {}]\r\n", exit_status);
-                    let _ = on_output.send(msg.into_bytes());
-                }
-                Some(russh::ChannelMsg::Eof) => {
-                    let _ = on_output.send("\r\n[连接已关闭]\r\n".as_bytes().to_vec());
-                    break;
-                }
-                Some(russh::ChannelMsg::Close) | None => break,
-                _ => {}
-            }
-        }
-    });
+    // 终端通道关闭时打标记，供 ssh_exec 判断会话是否仍然存活
+    let terminated = Arc::new(AtomicBool::new(false));
+    let terminated_flag = terminated.clone();
 
     // 同一标签页重连时（如 React StrictMode 双挂载）替换旧会话，
     // 按代数仲裁：仅保留最新一代连接，慢完成的旧连接自行退出，
@@ -236,7 +244,43 @@ pub async fn ssh_connect(
         params: params.clone(),
         gen,
         channel_writer,
+        terminated,
         sftp: Mutex::new(None),
+    });
+
+    // 后台任务：把远端输出持续推给前端
+    // 通道退出时标记会话已终止；若会话表仍指向本连接（非顶替/非用户断开），
+    // 说明是远端断开，通知前端把该会话从「可用」里移除
+    let notify = SessionCloseNotify {
+        app,
+        session: session.clone(),
+    };
+    tokio::spawn(async move {
+        loop {
+            match read_half.wait().await {
+                Some(russh::ChannelMsg::Data { ref data })
+                    if on_output.send(data.to_vec()).is_err() =>
+                {
+                    break; // 前端已关闭
+                }
+                Some(russh::ChannelMsg::ExtendedData { ref data, ext: 1 }) => {
+                    // stderr 也并入终端显示
+                    let _ = on_output.send(data.to_vec());
+                }
+                Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                    let msg = format!("\r\n[进程退出，状态码 {}]\r\n", exit_status);
+                    let _ = on_output.send(msg.into_bytes());
+                }
+                Some(russh::ChannelMsg::Eof) => {
+                    let _ = on_output.send("\r\n[连接已关闭]\r\n".as_bytes().to_vec());
+                    break;
+                }
+                Some(russh::ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+        terminated_flag.store(true, Ordering::Relaxed);
+        notify.emit().await;
     });
 
     sessions.0.lock().await.insert(params.id, session);
@@ -310,8 +354,9 @@ const EXEC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const EXEC_OUTPUT_LIMIT: usize = 16 * 1024;
 
 /// Agent 模式执行命令：独立 exec 通道执行并收集输出。
-/// 优先复用现有连接；部分服务器 MaxSessions=1 拒绝多开通道时，
-/// 与 SFTP 一样退回独立 TCP 连接执行。
+/// 仅在仍存活的会话上执行；部分服务器 MaxSessions=1 拒绝同一连接多开
+/// session 通道时，与 SFTP 一样退回独立 TCP 连接执行。
+/// 已断开/已退出的会话直接拒绝，避免「终端连接失败、Agent 却还能执行」的不一致。
 #[tauri::command]
 pub async fn ssh_exec(
     session_id: String,
@@ -325,6 +370,10 @@ pub async fn ssh_exec(
         .get(&session_id)
         .cloned()
         .ok_or_else(|| "会话不存在或已断开".to_string())?;
+
+    if session.terminated.load(Ordering::Relaxed) {
+        return Err("终端会话已断开，无法执行命令；请在侧栏重新连接后再试".to_string());
+    }
 
     match exec_on_handle(&session.handle, command.clone()).await {
         Ok(output) => Ok(output),
