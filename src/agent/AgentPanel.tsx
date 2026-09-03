@@ -47,6 +47,8 @@ import {
   saveSessionIndex,
 } from "./storage";
 import type { AgentSessionIndex } from "./storage";
+import { maybeExtractMemories } from "./memory";
+import { useMemories } from "./useMemories";
 import type {
   AgentChatMessage,
   AgentEntry,
@@ -78,6 +80,8 @@ export interface AiSettings {
   maxRetries: number;
   defaultMode: AgentMode;
   customInstruction: string;
+  /** 长期记忆自动提取开关 */
+  memoryEnabled: boolean;
 }
 
 interface Props {
@@ -167,6 +171,8 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
   /** 面板较窄时芯片收缩为纯图标 */
   const [composerCompact, setComposerCompact] = useState(false);
   const activeStreamRef = useRef<ActiveStream | null>(null);
+  // 最新条目快照：done 事件触发记忆提取时读取（事件回调闭包里的 entries 会过期）
+  const entriesRef = useRef<AgentEntry[]>([]);
   const autoExecRef = useRef(autoExec);
   const msgsRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLDivElement | null>(null);
@@ -255,6 +261,7 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     return () => flushPendingEntries();
   }, []);
 
+  const { memories } = useMemories();
 
   // 设置页改了 Provider 列表 / 默认 Provider 时同步刷新
   useEffect(() => {
@@ -313,6 +320,7 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
   }, [activeSessionId]);
 
   useEffect(() => {
+    entriesRef.current = entries;
     if (skipSaveRef.current) {
       skipSaveRef.current = false;
       return;
@@ -406,6 +414,13 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     if (event.type === "done") {
       if (event.id === stream.requestId) {
         finishStream();
+        // 回合正常结束：后台提取长期记忆（守卫不过会静默跳过）
+        maybeExtractMemories(
+          activeProvider,
+          entriesRef.current,
+          activeSessionId,
+          aiSettings.memoryEnabled
+        );
       }
       return;
     }
@@ -471,10 +486,19 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     // 全局自定义指令（设置页）以显式包裹注入 system prompt——
     // 弱模型对无标记的追加段落容易忽略，明确边界能显著提高遵循率
     const instruction = aiSettings.customInstruction.trim();
+    // 长期记忆：置顶优先，最多 30 条注入，避免挤占上下文
+    const memoryLines = memories
+      .filter((m) => m.enabled)
+      .slice(0, 30)
+      .map((m) => `- ${m.content}`)
+      .join("\n");
     const systemPrompt =
       (mode === "agent" ? SYSTEM_PROMPT + AGENT_PROMPT_EXTRA : SYSTEM_PROMPT) +
       (instruction
         ? `\n\n[用户的固定偏好，必须在每次回复中遵守]\n${instruction}`
+        : "") +
+      (memoryLines
+        ? `\n\n[长期记忆：跨会话保留的用户偏好与环境事实，回答时参考]\n${memoryLines}`
         : "");
     const payload: AgentChatMessage[] = [
       { role: "system", content: systemPrompt },

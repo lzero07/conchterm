@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Bot,
+  Check,
   Info,
   Palette,
+  Pin,
+  PinOff,
   Plus,
   RotateCcw,
   Search,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   COLOR_THEMES,
@@ -37,6 +41,8 @@ import {
   saveActiveProviderId,
   saveProviders,
 } from "../agent/storage";
+import { useMemories } from "../agent/useMemories";
+import type { MemoryItem } from "../agent/db";
 import type { AgentProvider } from "../agent/types";
 
 interface Props {
@@ -102,6 +108,52 @@ export default function SettingsView({
       cancelled = true;
     };
   }, []);
+
+  // 长期记忆管理（即时持久化，不走草稿/应用流程）
+  const {
+    memories,
+    loading: memoriesLoading,
+    add: addMemory,
+    update: updateMemory,
+    remove: removeMemory,
+    clear: clearMemories,
+  } = useMemories();
+  const [newMemory, setNewMemory] = useState("");
+  const [editingMemoryId, setEditingMemoryId] = useState<number | null>(null);
+  const [editingMemoryText, setEditingMemoryText] = useState("");
+
+  const submitNewMemory = async () => {
+    const content = newMemory.trim();
+    if (!content) return;
+    await addMemory(content);
+    setNewMemory("");
+  };
+
+  const startMemoryEdit = (m: MemoryItem) => {
+    setEditingMemoryId(m.id);
+    setEditingMemoryText(m.content);
+  };
+
+  const submitMemoryEdit = async () => {
+    if (editingMemoryId === null) return;
+    const content = editingMemoryText.trim();
+    if (content) {
+      await updateMemory(editingMemoryId, { content });
+    }
+    setEditingMemoryId(null);
+  };
+
+  const confirmClearMemories = () => {
+    void dialogs
+      .confirm("清空全部长期记忆？此操作不可恢复。", {
+        title: "清空记忆",
+        danger: true,
+        okLabel: "清空",
+      })
+      .then(({ ok }) => {
+        if (ok) void clearMemories();
+      });
+  };
 
   const persistProviders = (next: AgentProvider[]) => {
     setProviders(next);
@@ -701,6 +753,164 @@ export default function SettingsView({
               />
             </section>
 
+            {/* ---------- 长期记忆 ---------- */}
+            <section className="settings-section">
+              <h4>长期记忆</h4>
+              <p className="ai-field-desc">
+                AI 在对话后自动提取你的偏好与环境事实，跨会话注入后续对话。
+              </p>
+              <button
+                className={`toggle-row${draft.aiMemoryEnabled ? " on" : ""}`}
+                role="switch"
+                aria-checked={draft.aiMemoryEnabled}
+                onClick={() => patch({ aiMemoryEnabled: !draft.aiMemoryEnabled })}
+              >
+                <span className="toggle-text">
+                  <span className="option-title">自动提取记忆</span>
+                  <span className="option-desc">
+                    每轮对话结束后由 AI 判断是否有值得记住的信息（会消耗少量额外
+                    token，可在监控中心按 memory 模式查看）。
+                  </span>
+                </span>
+                <span className="switch">
+                  <span className="knob" />
+                </span>
+              </button>
+
+              <div className="ai-memory-toolbar">
+                <input
+                  className="ai-memory-input"
+                  value={newMemory}
+                  maxLength={200}
+                  placeholder="手动添加一条记忆，例：生产服务器在东京机房"
+                  onChange={(e) => setNewMemory(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                      void submitNewMemory();
+                    }
+                  }}
+                />
+                <button
+                  className="ghost-btn"
+                  title="添加记忆"
+                  disabled={!newMemory.trim()}
+                  onClick={() => void submitNewMemory()}
+                >
+                  <Plus size={13} strokeWidth={1.8} />
+                </button>
+                <button
+                  className="ghost-btn danger"
+                  title="清空全部记忆"
+                  disabled={memories.length === 0}
+                  onClick={confirmClearMemories}
+                >
+                  <Trash2 size={13} strokeWidth={1.8} />
+                  清空
+                </button>
+              </div>
+
+              {memoriesLoading ? (
+                <p className="ai-memory-empty">加载中…</p>
+              ) : memories.length === 0 ? (
+                <p className="ai-memory-empty">
+                  暂无记忆，AI 会在对话后自动记录重要信息。
+                </p>
+              ) : (
+                <div className="ai-memory-list">
+                  {memories.map((m) => (
+                    <div
+                      key={m.id}
+                      className={`ai-memory-item${m.enabled ? "" : " disabled"}`}
+                    >
+                      {editingMemoryId === m.id ? (
+                        <>
+                          <textarea
+                            className="ai-memory-edit"
+                            rows={2}
+                            maxLength={200}
+                            value={editingMemoryText}
+                            autoFocus
+                            onChange={(e) =>
+                              setEditingMemoryText(e.target.value)
+                            }
+                            onKeyDown={(e) => {
+                              if (
+                                e.key === "Enter" &&
+                                !e.shiftKey &&
+                                !e.nativeEvent.isComposing
+                              ) {
+                                e.preventDefault();
+                                void submitMemoryEdit();
+                              }
+                              if (e.key === "Escape") setEditingMemoryId(null);
+                            }}
+                          />
+                          <span className="ai-memory-actions">
+                            <button
+                              className="ghost-btn"
+                              title="保存"
+                              disabled={!editingMemoryText.trim()}
+                              onClick={() => void submitMemoryEdit()}
+                            >
+                              <Check size={13} strokeWidth={1.8} />
+                            </button>
+                            <button
+                              className="ghost-btn"
+                              title="取消"
+                              onClick={() => setEditingMemoryId(null)}
+                            >
+                              <X size={13} strokeWidth={1.8} />
+                            </button>
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <span
+                            className="ai-memory-content"
+                            title={m.content}
+                            onClick={() => startMemoryEdit(m)}
+                          >
+                            {m.pinned && <Pin size={11} strokeWidth={2} />}
+                            {m.content}
+                          </span>
+                          <span className="ai-memory-actions">
+                            <button
+                              className="ghost-btn"
+                              title={m.pinned ? "取消置顶" : "置顶（注入时永不截断）"}
+                              onClick={() =>
+                                void updateMemory(m.id, { pinned: !m.pinned })
+                              }
+                            >
+                              {m.pinned ? (
+                                <PinOff size={13} strokeWidth={1.8} />
+                              ) : (
+                                <Pin size={13} strokeWidth={1.8} />
+                              )}
+                            </button>
+                            <button
+                              className="ghost-btn"
+                              title={m.enabled ? "停用（保留但不注入）" : "启用"}
+                              onClick={() =>
+                                void updateMemory(m.id, { enabled: !m.enabled })
+                              }
+                            >
+                              {m.enabled ? "停用" : "启用"}
+                            </button>
+                            <button
+                              className="ghost-btn danger"
+                              title="删除"
+                              onClick={() => void removeMemory(m.id)}
+                            >
+                              <Trash2 size={13} strokeWidth={1.8} />
+                            </button>
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
           </div>
         )}
         {category === "about" && (

@@ -120,6 +120,8 @@ export interface AppSettings {
   aiDefaultMode: "chat" | "agent";
   /** 全局自定义指令：附加到所有 AI 对话的 system prompt */
   aiCustomInstruction: string;
+  /** 长期记忆自动提取：对话回合结束后由 AI 提取偏好/环境事实存入本地库 */
+  aiMemoryEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -139,6 +141,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiMaxRetries: 2,
   aiDefaultMode: "chat",
   aiCustomInstruction: "",
+  aiMemoryEnabled: true,
 };
 
 const STORAGE_KEY = "conchterm.settings";
@@ -197,6 +200,7 @@ export function loadSettings(): AppSettings {
         typeof merged.aiCustomInstruction === "string"
           ? merged.aiCustomInstruction
           : "",
+      aiMemoryEnabled: merged.aiMemoryEnabled !== false,
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
