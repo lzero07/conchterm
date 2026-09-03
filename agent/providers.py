@@ -32,6 +32,8 @@ def build_model(provider: dict):
         "model": model,
         "api_key": api_key,
         "streaming": True,
+        # 请求在最后一个流式 chunk 中返回 usage（监控中心统计 token 用量）
+        "stream_usage": True,
     }
     if base_url:
         kwargs["base_url"] = base_url

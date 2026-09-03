@@ -49,6 +49,7 @@ import {
 import type { AgentSessionIndex } from "./storage";
 import { maybeExtractMemories } from "./memory";
 import { useMemories } from "./useMemories";
+import { usageDeleteProvider } from "../monitor/api";
 import type {
   AgentChatMessage,
   AgentEntry,
@@ -414,6 +415,8 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     if (event.type === "done") {
       if (event.id === stream.requestId) {
         finishStream();
+        // 通知监控中心：本轮用量已落库，可立即刷新统计
+        window.dispatchEvent(new CustomEvent("conchterm.usage-changed"));
         // 回合正常结束：后台提取长期记忆（守卫不过会静默跳过）
         maybeExtractMemories(
           activeProvider,
@@ -740,6 +743,12 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
         const next = providers.filter((p) => p.id !== provider.id);
         persistProviders(next);
         agentDeleteKey(provider.id).catch(() => {});
+        // 连带清掉历史用量记录，监控中心不再出现已删 Provider
+        usageDeleteProvider(provider.id)
+          .then(() =>
+            window.dispatchEvent(new CustomEvent("conchterm.usage-changed"))
+          )
+          .catch(() => {});
         if (activeId === provider.id) {
           const fallback = next[0]?.id ?? "";
           changeProvider(fallback);

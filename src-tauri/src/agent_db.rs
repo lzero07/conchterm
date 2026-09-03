@@ -405,7 +405,11 @@ pub async fn agent_kv_get(db: State<'_, AgentDb>, key: String) -> Result<String,
 }
 
 #[tauri::command]
-pub async fn agent_kv_set(db: State<'_, AgentDb>, key: String, value: String) -> Result<(), String> {
+pub async fn agent_kv_set(
+    db: State<'_, AgentDb>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
     let conn = db.0.clone();
     tokio::task::spawn_blocking(move || {
         let conn = conn.lock().unwrap();

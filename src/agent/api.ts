@@ -4,8 +4,8 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   AgentChatMessage,
   AgentEvent,
-  AgentMode,
   AgentProvider,
+  AgentRequestMode,
 } from "./types";
 
 export function agentSetKey(providerId: string, apiKey: string): Promise<void> {
@@ -25,7 +25,7 @@ export function agentHasKey(providerId: string): Promise<boolean> {
 export function agentChat(
   provider: AgentProvider,
   messages: AgentChatMessage[],
-  mode: AgentMode,
+  mode: AgentRequestMode,
   onEvent: (event: AgentEvent) => void,
   maxRounds?: number
 ): Promise<string> {
@@ -34,6 +34,7 @@ export function agentChat(
   return invoke<string>("agent_chat", {
     provider: {
       id: provider.id,
+      name: provider.name,
       protocol: provider.protocol,
       baseUrl: provider.baseUrl,
       model: provider.activeModel || provider.defaultModel,
@@ -57,6 +58,7 @@ export function agentListModels(
   return invoke<string>("agent_list_models", {
     provider: {
       id: provider.id,
+      name: provider.name,
       protocol: provider.protocol,
       baseUrl: provider.baseUrl,
       model: provider.defaultModel,

@@ -1,17 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, Suspense, lazy } from "react";
 import {
+  Activity,
   Bot,
   Copy,
   FolderOpen,
   Minus,
-  Moon,
   Pencil,
   Plus,
   Settings as SettingsIcon,
   Server,
   Square,
-  Sun,
-  SunMoon,
   Terminal,
   Trash2,
   X,
@@ -26,6 +24,7 @@ import SettingsView from "./components/SettingsView";
 import { DialogProvider, useDialogs } from "./components/Dialogs";
 import AgentPanel from "./agent/AgentPanel";
 
+const MonitorView = lazy(() => import("./monitor/MonitorView"));
 import {
   applyAppearance,
   applyZoom,
@@ -82,6 +81,7 @@ function AppShell() {
   const [servers, setServers] = useState<ServerProfile[]>(loadServers);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [monitorOpen, setMonitorOpen] = useState(false);
   const [previewSettings, setPreviewSettings] = useState<AppSettings | null>(
     null
   );
@@ -213,6 +213,20 @@ function AppShell() {
     setSettingsOpen(false);
     // 丢弃未应用的预览，还原到已提交配置
     applySideEffects(settings);
+  };
+
+  // 设置与监控中心同占主区域，互斥展示
+  const openMonitor = () => {
+    if (settingsOpen) closeSettings();
+    setMonitorOpen(true);
+  };
+
+  const toggleMonitor = () => {
+    if (monitorOpen) {
+      setMonitorOpen(false);
+    } else {
+      openMonitor();
+    }
   };
 
   // 文件面板跟随当前活跃终端的会话
@@ -371,9 +385,23 @@ function AppShell() {
           <button
             className={`title-ai${settingsOpen ? " active" : ""}`}
             title="设置"
-            onClick={settingsOpen ? closeSettings : () => setSettingsOpen(true)}
+            onClick={
+              settingsOpen
+                ? closeSettings
+                : () => {
+                    setMonitorOpen(false);
+                    setSettingsOpen(true);
+                  }
+            }
           >
             <SettingsIcon size={17} strokeWidth={2} />
+          </button>
+          <button
+            className={`title-ai${monitorOpen ? " active" : ""}`}
+            title="监控中心"
+            onClick={toggleMonitor}
+          >
+            <Activity size={17} strokeWidth={2} />
           </button>
           <button
             className={`title-ai${agentDockOpen ? " active" : ""}`}
@@ -381,34 +409,6 @@ function AppShell() {
             onClick={toggleAgentDock}
           >
             <Bot size={20} strokeWidth={2} />
-          </button>
-          <button
-            className="title-ai"
-            title={
-              settings.themeMode === "dark"
-                ? "主题：暗色（点击切换到跟随系统）"
-                : settings.themeMode === "light"
-                  ? "主题：亮色（点击切换到暗色）"
-                  : "主题：跟随系统（点击切换到亮色）"
-            }
-            onClick={() => {
-              const next =
-                settings.themeMode === "light"
-                  ? "dark"
-                  : settings.themeMode === "dark"
-                    ? "system"
-                    : "light";
-              applySettings({ ...settings, themeMode: next });
-              showThemeToast(next);
-            }}
-          >
-            {settings.themeMode === "dark" ? (
-              <Moon size={17} strokeWidth={2} />
-            ) : settings.themeMode === "light" ? (
-              <Sun size={17} strokeWidth={2} />
-            ) : (
-              <SunMoon size={17} strokeWidth={2} />
-            )}
           </button>
           <button
             className="title-btn"
@@ -563,7 +563,7 @@ function AppShell() {
       <main className="main-area">
         <div
           className="main-normal"
-          style={{ display: settingsOpen ? "none" : "flex" }}
+          style={{ display: settingsOpen || monitorOpen ? "none" : "flex" }}
         >
           <div
             className={`tab-bar${settings.tabOverflow === "wrap" ? " tab-wrap" : ""}`}
@@ -609,6 +609,11 @@ function AppShell() {
             onApplyAndClose={applySettingsAndClose}
             onClose={closeSettings}
           />
+        )}
+        {monitorOpen && (
+          <Suspense fallback={null}>
+            <MonitorView />
+          </Suspense>
         )}
       </main>
 

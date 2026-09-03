@@ -42,6 +42,7 @@ import {
   saveProviders,
 } from "../agent/storage";
 import { useMemories } from "../agent/useMemories";
+import { usageDeleteProvider } from "../monitor/api";
 import type { MemoryItem } from "../agent/db";
 import type { AgentProvider } from "../agent/types";
 
@@ -200,6 +201,12 @@ export default function SettingsView({
         const next = providers.filter((p) => p.id !== provider.id);
         persistProviders(next);
         agentDeleteKey(provider.id).catch(() => {});
+        // 连带清掉历史用量记录，监控中心不再出现已删 Provider
+        usageDeleteProvider(provider.id)
+          .then(() =>
+            window.dispatchEvent(new CustomEvent("conchterm.usage-changed"))
+          )
+          .catch(() => {});
         if (activeProviderId === provider.id) {
           const fallback = next[0]?.id ?? "";
           setActiveProviderId(fallback);

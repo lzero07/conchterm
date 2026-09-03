@@ -29,6 +29,9 @@ static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 #[serde(rename_all = "camelCase")]
 pub struct AgentProviderInput {
     pub id: String,
+    /// Provider 显示名（用量统计落库用；旧前端可能不带）
+    #[serde(default)]
+    pub name: Option<String>,
     pub protocol: String,
     pub base_url: String,
     pub model: String,
@@ -43,6 +46,17 @@ pub struct AgentChatMessage {
     pub content: String,
 }
 
+/// Python 回传的 token 用量（usage_metadata 三键；缺省字段按 0 处理）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub input_tokens: i64,
+    #[serde(default)]
+    pub output_tokens: i64,
+    #[serde(default)]
+    pub total_tokens: i64,
+}
+
 /// Python -> 前端的事件（与 agent/main.py 的 JSON 协议一一对应）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -50,7 +64,11 @@ pub enum AgentEvent {
     #[serde(rename = "delta")]
     Delta { id: String, content: String },
     #[serde(rename = "done")]
-    Done { id: String },
+    Done {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<TokenUsage>,
+    },
     #[serde(rename = "error")]
     Error { id: String, message: String },
     #[serde(rename = "ready")]
@@ -71,7 +89,7 @@ impl AgentEvent {
     fn request_id(&self) -> Option<&str> {
         match self {
             AgentEvent::Delta { id, .. }
-            | AgentEvent::Done { id }
+            | AgentEvent::Done { id, .. }
             | AgentEvent::Error { id, .. }
             | AgentEvent::ToolCall { id, .. }
             | AgentEvent::Models { id, .. } => Some(id),
@@ -91,6 +109,8 @@ struct AgentProcess {
 pub struct AgentState {
     process: Arc<Mutex<Option<AgentProcess>>>,
     pending: Arc<Mutex<HashMap<String, Channel<AgentEvent>>>>,
+    /// 请求 id -> 归属信息（Provider/模型），done 落库时消费
+    contexts: Arc<Mutex<HashMap<String, crate::usage_db::RequestContext>>>,
     spawn_lock: Arc<Mutex<()>>,
 }
 
@@ -164,6 +184,8 @@ fn python_candidates() -> Vec<(String, Vec<String>)> {
 fn ensure_process(
     process: &Arc<Mutex<Option<AgentProcess>>>,
     pending: &Arc<Mutex<HashMap<String, Channel<AgentEvent>>>>,
+    contexts: &Arc<Mutex<HashMap<String, crate::usage_db::RequestContext>>>,
+    db: &crate::usage_db::UsageDb,
     spawn_lock: &Arc<Mutex<()>>,
 ) -> Result<(), String> {
     {
@@ -231,6 +253,8 @@ fn ensure_process(
             stdout,
             process.clone(),
             pending.clone(),
+            contexts.clone(),
+            db.clone(),
             generation,
             ready_tx,
         );
@@ -263,6 +287,8 @@ fn spawn_reader(
     stdout: ChildStdout,
     process: Arc<Mutex<Option<AgentProcess>>>,
     pending: Arc<Mutex<HashMap<String, Channel<AgentEvent>>>>,
+    contexts: Arc<Mutex<HashMap<String, crate::usage_db::RequestContext>>>,
+    db: crate::usage_db::UsageDb,
     generation: u64,
     ready_tx: mpsc::Sender<bool>,
 ) {
@@ -294,6 +320,19 @@ fn spawn_reader(
             let Some(id) = event.request_id().map(str::to_string) else {
                 continue;
             };
+            // 回合结束且带用量：消费请求归属信息，落一条用量记录
+            if let AgentEvent::Done {
+                id: done_id,
+                usage: Some(usage),
+            } = &event
+            {
+                let ctx = contexts.lock().unwrap().remove(done_id);
+                if let Some(ctx) = ctx {
+                    if let Err(e) = crate::usage_db::insert_usage(&db, &ctx, usage) {
+                        eprintln!("记录 token 用量失败: {e}");
+                    }
+                }
+            }
             let finished = matches!(
                 event,
                 AgentEvent::Done { .. } | AgentEvent::Error { .. } | AgentEvent::Models { .. }
@@ -304,6 +343,7 @@ fn spawn_reader(
             }
             if finished {
                 pending.lock().unwrap().remove(&id);
+                contexts.lock().unwrap().remove(&id);
             }
         }
 
@@ -326,6 +366,7 @@ fn spawn_reader(
                 message: "智能体进程已退出，请重试".into(),
             });
         }
+        contexts.lock().unwrap().clear();
     });
 }
 
@@ -334,6 +375,7 @@ fn spawn_reader(
 #[tauri::command]
 pub async fn agent_chat(
     state: State<'_, AgentState>,
+    db: State<'_, crate::usage_db::UsageDb>,
     provider: AgentProviderInput,
     messages: Vec<AgentChatMessage>,
     mode: Option<String>,
@@ -345,18 +387,22 @@ pub async fn agent_chat(
     // 冷启动（拉起进程）可能耗时数秒，放到阻塞线程池执行
     let process = state.process.clone();
     let pending = state.pending.clone();
+    let contexts = state.contexts.clone();
+    let db_clone = db.inner().clone();
     let spawn_lock = state.spawn_lock.clone();
-    let ensure =
-        tokio::task::spawn_blocking(move || ensure_process(&process, &pending, &spawn_lock))
-            .await
-            .map_err(|e| format!("智能体任务执行失败: {e}"))?;
+    let ensure = tokio::task::spawn_blocking(move || {
+        ensure_process(&process, &pending, &contexts, &db_clone, &spawn_lock)
+    })
+    .await
+    .map_err(|e| format!("智能体任务执行失败: {e}"))?;
     ensure?;
 
+    let resolved_mode = mode.unwrap_or_else(|| "chat".into());
     let request_id = format!("r{}", NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed));
     let request = json!({
         "type": "chat",
         "id": request_id,
-        "mode": mode.unwrap_or_else(|| "chat".into()),
+        "mode": resolved_mode,
         "max_rounds": max_rounds,
         "provider": {
             "protocol": provider.protocol,
@@ -368,12 +414,27 @@ pub async fn agent_chat(
     });
     let line = format!("{request}\n");
 
-    // 先注册回调再写请求，避免早期 delta 丢失
+    // 先注册回调与归属信息再写请求，避免早期 delta / done 丢失
     state
         .pending
         .lock()
         .unwrap()
         .insert(request_id.clone(), on_delta);
+    state.contexts.lock().unwrap().insert(
+        request_id.clone(),
+        crate::usage_db::RequestContext {
+            provider_id: provider.id.clone(),
+            // 用量统计的展示名：名称缺失/为空时回退到 id，避免监控中心出现空来源
+            provider_name: provider
+                .name
+                .clone()
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| provider.id.clone()),
+            model: provider.model.clone(),
+            protocol: provider.protocol.clone(),
+            mode: resolved_mode,
+        },
+    );
 
     let write_result = {
         let mut guard = state.process.lock().unwrap();
@@ -381,6 +442,7 @@ pub async fn agent_chat(
             Some(p) => {
                 if !matches!(p.child.try_wait(), Ok(None)) {
                     state.pending.lock().unwrap().remove(&request_id);
+                    state.contexts.lock().unwrap().remove(&request_id);
                     return Err("智能体进程未运行，请重试".into());
                 }
                 p.stdin
@@ -389,12 +451,14 @@ pub async fn agent_chat(
             }
             None => {
                 state.pending.lock().unwrap().remove(&request_id);
+                state.contexts.lock().unwrap().remove(&request_id);
                 Err(std::io::Error::other("进程未运行"))
             }
         }
     };
     if let Err(e) = write_result {
         state.pending.lock().unwrap().remove(&request_id);
+        state.contexts.lock().unwrap().remove(&request_id);
         return Err(format!("发送聊天请求失败: {e}"));
     }
 
@@ -435,6 +499,7 @@ pub fn agent_tool_result(
 #[tauri::command]
 pub async fn agent_list_models(
     state: State<'_, AgentState>,
+    db: State<'_, crate::usage_db::UsageDb>,
     provider: AgentProviderInput,
     on_event: Channel<AgentEvent>,
 ) -> Result<String, String> {
@@ -447,11 +512,14 @@ pub async fn agent_list_models(
     // 冷启动保护：sidecar 未运行时先拉起
     let process = state.process.clone();
     let pending = state.pending.clone();
+    let contexts = state.contexts.clone();
+    let db_clone = db.inner().clone();
     let spawn_lock = state.spawn_lock.clone();
-    let ensure =
-        tokio::task::spawn_blocking(move || ensure_process(&process, &pending, &spawn_lock))
-            .await
-            .map_err(|e| format!("智能体任务执行失败: {e}"))?;
+    let ensure = tokio::task::spawn_blocking(move || {
+        ensure_process(&process, &pending, &contexts, &db_clone, &spawn_lock)
+    })
+    .await
+    .map_err(|e| format!("智能体任务执行失败: {e}"))?;
     ensure?;
 
     let request_id = format!("m{}", NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed));
@@ -497,5 +565,6 @@ pub async fn agent_list_models(
 #[tauri::command]
 pub fn agent_cancel(state: State<'_, AgentState>, request_id: String) -> Result<(), String> {
     state.pending.lock().unwrap().remove(&request_id);
+    state.contexts.lock().unwrap().remove(&request_id);
     Ok(())
 }

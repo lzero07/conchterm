@@ -3,6 +3,7 @@ mod agent_db;
 mod drag_out;
 mod ssh;
 mod tray;
+mod usage_db;
 
 use ssh::{SessionMap, SshSession};
 use std::collections::HashMap;
@@ -18,6 +19,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             tray::init(app)?;
+            app.manage(usage_db::init(app)?);
             app.manage(agent_db::init(app)?);
             Ok(())
         })
@@ -48,6 +50,9 @@ pub fn run() {
             agent_bridge::agent_set_key,
             agent_bridge::agent_delete_key,
             agent_bridge::agent_has_key,
+            usage_db::usage_query,
+            usage_db::usage_filter_options,
+            usage_db::usage_delete_provider,
             agent_db::agent_sessions_list,
             agent_db::agent_session_save,
             agent_db::agent_sessions_delete,

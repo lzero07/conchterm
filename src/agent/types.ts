@@ -4,6 +4,9 @@ export type AgentProtocol = "openai" | "anthropic";
 
 export type AgentMode = "chat" | "agent";
 
+/** 请求模式：AgentMode 之外还有内部提取请求（用量监控里用于区分） */
+export type AgentRequestMode = AgentMode | "memory";
+
 export interface AgentProvider {
   id: string;
   name: string;
@@ -25,6 +28,13 @@ export interface AgentChatMessage {
   content: string;
 }
 
+/** done 事件携带的 token 用量（供应商未返回时缺省） */
+export interface TokenUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
+
 /** Rust 端转发的 Python 流式事件 */
 export interface AgentEvent {
   type: "delta" | "done" | "error" | "tool_call" | "models";
@@ -35,6 +45,7 @@ export interface AgentEvent {
   callId?: string;
   tool?: string;
   args?: Record<string, unknown>;
+  usage?: TokenUsage;
 }
 
 // ---------- 聊天记录条目（消息与工具调用卡片） ----------

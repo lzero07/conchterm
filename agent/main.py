@@ -6,7 +6,9 @@
 响应（Python -> Rust）：
   {"type": "ready"}                                   进程就绪
   {"type": "delta", "id": "r1", "content": "..."}     流式增量
-  {"type": "done",  "id": "r1"}                       回合结束
+  {"type": "done",  "id": "r1",                       回合结束
+   "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}}
+                                                      （usage 缺省 = 供应商未返回用量）
   {"type": "error", "id": "r1", "message": "..."}     本回合失败
   {"type": "tool_call", "id": "r1", "callId": "c1",
    "tool": "run_command", "args": {"command": "..."}} 请求宿主执行命令
@@ -58,17 +60,51 @@ def extract_text(content) -> str:
     return ""
 
 
+def normalize_usage(meta) -> dict | None:
+    """把 LangChain 的 usage_metadata 归一化为固定三键；无效则返回 None。"""
+    if not isinstance(meta, dict):
+        return None
+    usage = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = meta.get(key, 0)
+        usage[key] = int(value) if isinstance(value, (int, float)) else 0
+    return usage
+
+
+def merge_usage(total: dict | None, inc: dict | None) -> dict | None:
+    """把一次调用的用量累加到累计值；两者皆空则返回 None。"""
+    if inc is None:
+        return total
+    if total is None:
+        total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    for key in total:
+        total[key] += inc.get(key, 0)
+    return total
+
+
+def emit_done(req_id: str, usage: dict | None) -> None:
+    """done 事件；有用量统计时附带 usage 字段。"""
+    event = {"type": "done", "id": req_id}
+    if usage:
+        event["usage"] = usage
+    emit(event)
+
+
 def handle_chat(req: dict) -> None:
     """处理一次聊天请求：流式生成并逐段回写。"""
     req_id = req.get("id", "")
     try:
         model = build_model(req.get("provider", {}))
         messages = to_messages(req.get("messages", []))
+        usage_meta = None
         for chunk in model.stream(messages):
+            meta = getattr(chunk, "usage_metadata", None)
+            if meta:
+                usage_meta = meta  # 最后一个带用量的 chunk 携带总量
             text = extract_text(chunk.content)
             if text:
                 emit({"type": "delta", "id": req_id, "content": text})
-        emit({"type": "done", "id": req_id})
+        emit_done(req_id, normalize_usage(usage_meta))
     except Exception as exc:  # 网络/鉴权/缺依赖等异常统一转成事件回传
         message = str(exc) or exc.__class__.__name__
         if "No module named" in message:
@@ -140,15 +176,20 @@ def handle_agent(req: dict) -> None:
 
         model = build_model(req.get("provider", {})).bind_tools([run_command])
         messages = to_messages(req.get("messages", []))
+        usage_totals = None
 
         for _ in range(max_rounds):
             response = model.invoke(messages)
+            usage_totals = merge_usage(
+                usage_totals,
+                normalize_usage(getattr(response, "usage_metadata", None)),
+            )
             tool_calls = getattr(response, "tool_calls", None) or []
             text = extract_text(response.content)
             if text:
                 emit({"type": "delta", "id": req_id, "content": text})
             if not tool_calls:
-                emit({"type": "done", "id": req_id})
+                emit_done(req_id, usage_totals)
                 return
 
             messages.append(response)
