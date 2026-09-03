@@ -22,6 +22,7 @@ import FileBrowser from "./components/FileBrowser";
 import SettingsView from "./components/SettingsView";
 import { DialogProvider, useDialogs } from "./components/Dialogs";
 import AgentPanel from "./agent/AgentPanel";
+
 import {
   applyAppearance,
   applyZoom,

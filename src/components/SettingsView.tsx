@@ -72,17 +72,36 @@ export default function SettingsView({
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [category, setCategory] = useState<Category>("appearance");
   const [query, setQuery] = useState("");
-  // AI Provider 列表：与 Agent 面板共享同一份 localStorage 数据
-  const [providers, setProviders] = useState<AgentProvider[]>(loadProviders);
-  const [activeProviderId, setActiveProviderId] = useState<string>(
-    loadActiveProviderId
-  );
+  // AI Provider 列表：与 Agent 面板共享同一份 SQLite 数据（异步加载）
+  const [providers, setProviders] = useState<AgentProvider[]>([]);
+  const [activeProviderId, setActiveProviderId] = useState<string>("");
   const [providerFormOpen, setProviderFormOpen] = useState(false);
   const [editingProvider, setEditingProvider] = useState<AgentProvider | null>(
     null
   );
   // 正在拉取模型列表的 Provider id
   const [fetchingModelsId, setFetchingModelsId] = useState<string | null>(null);
+
+  // 初始加载：SQLite 里的 Provider 列表与默认 Provider
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [ps, active] = await Promise.all([
+          loadProviders(),
+          loadActiveProviderId(),
+        ]);
+        if (cancelled) return;
+        setProviders(ps);
+        setActiveProviderId(active);
+      } catch {
+        // 加载失败保持空列表，具体操作时再暴露错误
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const persistProviders = (next: AgentProvider[]) => {
     setProviders(next);
@@ -681,6 +700,7 @@ export default function SettingsView({
                 }
               />
             </section>
+
           </div>
         )}
         {category === "about" && (

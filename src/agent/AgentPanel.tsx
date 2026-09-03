@@ -35,6 +35,7 @@ import {
 import {
   deleteSessionEntries,
   DEFAULT_SESSION_TITLE,
+  flushPendingEntries,
   loadActiveProviderId,
   loadProviders,
   loadSessionEntries,
@@ -136,12 +137,16 @@ function formatTime(ts: number): string {
 /** AI 助手面板：会话管理 / 问答与 Agent 双模式 / 流式聊天 / 命令确认 */
 export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: Props) {
   const dialogs = useDialogs();
-  const [providers, setProviders] = useState<AgentProvider[]>(loadProviders);
-  const [activeId, setActiveId] = useState<string>(loadActiveProviderId);
+  const [providers, setProviders] = useState<AgentProvider[]>([]);
+  const [activeId, setActiveId] = useState<string>("");
   // 初始模式取设置里的默认值；会话内切换只影响当前对话，不写回全局默认
   const [mode, setMode] = useState<AgentMode>(aiSettings.defaultMode);
-  const [sessionIndex, setSessionIndex] =
-    useState<AgentSessionIndex>(loadSessionIndex);
+  const [sessionIndex, setSessionIndex] = useState<AgentSessionIndex>({
+    sessions: [],
+    activeId: "",
+  });
+  // SQLite 异步加载完成前禁用发送，避免用空历史发起请求
+  const [ready, setReady] = useState(false);
   const [targetSessionId, setTargetSessionId] = useState<string>(
     activeTerminalId ?? sessions[0]?.id ?? ""
   );
@@ -199,40 +204,81 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
   // 会话刚载入时跳过一次保存，避免用空数组覆盖已存记录
   const skipSaveRef = useRef(true);
 
-  // 启动时用系统凭据管理器的实际状态校准 hasKey 标记
+  // 初始加载：SQLite 里的会话索引 / Provider / 活跃 Provider；没有会话时建一个。
+  // 逻辑收拢在单个 async 流程里，规避 StrictMode 下 effect 双跑建出两个会话
   useEffect(() => {
     let cancelled = false;
-    Promise.all(
-      loadProviders().map(async (p) => ({
-        id: p.id,
-        hasKey: await agentHasKey(p.id).catch(() => p.hasKey),
-      }))
-    ).then((flags) => {
-      if (cancelled) return;
-      setProviders((prev) => {
-        const next = prev.map((p) => ({
+    void (async () => {
+      try {
+        let idx = await loadSessionIndex();
+        if (idx.sessions.length === 0) {
+          const meta = newSessionMeta();
+          idx = { sessions: [meta], activeId: meta.id };
+          saveSessionIndex(idx);
+        }
+        const [ps, active] = await Promise.all([
+          loadProviders(),
+          loadActiveProviderId(),
+        ]);
+        // 用系统凭据管理器的实际状态校准 hasKey 标记
+        const flags = await Promise.all(
+          ps.map(async (p) => ({
+            id: p.id,
+            hasKey: await agentHasKey(p.id).catch(() => p.hasKey),
+          }))
+        );
+        const calibrated = ps.map((p) => ({
           ...p,
           hasKey: flags.find((f) => f.id === p.id)?.hasKey ?? p.hasKey,
         }));
-        saveProviders(next);
-        return next;
-      });
-    });
+        if (calibrated.some((p, i) => p.hasKey !== ps[i].hasKey)) {
+          saveProviders(calibrated);
+        }
+        if (cancelled) return;
+        setSessionIndex(idx);
+        setProviders(calibrated);
+        setActiveId(active);
+      } catch {
+        // 存储加载失败：面板仍可用（空会话），错误在具体操作时再暴露
+      } finally {
+        if (!cancelled) setReady(true);
+      }
+    })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 面板卸载（dock 关闭）时把待写条目缓冲立即落库
+  useEffect(() => {
+    return () => flushPendingEntries();
+  }, []);
+
+
   // 设置页改了 Provider 列表 / 默认 Provider 时同步刷新
   useEffect(() => {
+    let cancelled = false;
     const sync = () => {
-      setProviders(loadProviders());
-      setActiveId(loadActiveProviderId());
+      void (async () => {
+        try {
+          const [ps, active] = await Promise.all([
+            loadProviders(),
+            loadActiveProviderId(),
+          ]);
+          if (cancelled) return;
+          setProviders(ps);
+          setActiveId(active);
+        } catch {
+          // 同步失败保持现状
+        }
+      })();
     };
     window.addEventListener("conchterm.providers-changed", sync);
-    return () =>
+    return () => {
+      cancelled = true;
       window.removeEventListener("conchterm.providers-changed", sync);
+    };
   }, []);
 
   // 活跃终端变化时跟随切换目标会话
@@ -249,24 +295,21 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions]);
 
-  // 没有任何会话时自动创建一个
-  useEffect(() => {
-    if (!sessionIndex.sessions.length) {
-      const meta = newSessionMeta();
-      const next: AgentSessionIndex = {
-        sessions: [meta],
-        activeId: meta.id,
-      };
-      setSessionIndex(next);
-      saveSessionIndex(next);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // 切换会话时载入对应记录
   useEffect(() => {
     skipSaveRef.current = true;
-    setEntries(activeSessionId ? loadSessionEntries(activeSessionId) : []);
+    // 先同步清空：加载失败/空会话时不残留上一个会话的内容
+    setEntries([]);
+    if (!activeSessionId) {
+      return;
+    }
+    let cancelled = false;
+    void loadSessionEntries(activeSessionId).then((loaded) => {
+      if (!cancelled) setEntries(loaded);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -361,7 +404,9 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
       return;
     }
     if (event.type === "done") {
-      if (event.id === stream.requestId) finishStream();
+      if (event.id === stream.requestId) {
+        finishStream();
+      }
       return;
     }
     // error：空 id 表示进程级错误，否则是当前请求失败
@@ -378,7 +423,8 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
   const send = async () => {
     const provider = activeProvider;
     const text = input.trim();
-    if (!provider || !text || busy || !activeSessionId) return;
+    // 存储未就绪时不发送：否则会以空历史发起请求，破坏上下文
+    if (!provider || !text || busy || !activeSessionId || !ready) return;
     if (mode === "agent" && !targetSession) return;
 
     const userEntry: MessageEntry = {
@@ -526,6 +572,8 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
   };
 
   const createSession = () => {
+    // 流式进行中新建会话：先停止，避免后续增量/工具卡片写进新会话
+    stop();
     // 没发送过消息的空会话直接复用，不重复新建
     if (
       activeMeta?.title === DEFAULT_SESSION_TITLE &&
@@ -533,22 +581,24 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     ) {
       return;
     }
-    const emptySession = sessionIndex.sessions.find(
-      (s) =>
-        s.title === DEFAULT_SESSION_TITLE &&
-        loadSessionEntries(s.id).length === 0
-    );
-    if (emptySession) {
-      switchSession(emptySession.id);
-      return;
-    }
-    const meta = newSessionMeta();
-    const next: AgentSessionIndex = {
-      sessions: [meta, ...sessionIndex.sessions],
-      activeId: meta.id,
-    };
-    setSessionIndex(next);
-    saveSessionIndex(next);
+    void (async () => {
+      for (const s of sessionIndex.sessions) {
+        if (s.title !== DEFAULT_SESSION_TITLE) continue;
+        // 库里也没有条目才算真空会话（索引可能还留着刚建未发言的）
+        const stored = await loadSessionEntries(s.id);
+        if (stored.length === 0) {
+          switchSession(s.id);
+          return;
+        }
+      }
+      const meta = newSessionMeta();
+      const next: AgentSessionIndex = {
+        sessions: [meta, ...sessionIndex.sessions],
+        activeId: meta.id,
+      };
+      setSessionIndex(next);
+      saveSessionIndex(next);
+    })();
   };
 
   const startRename = () => {

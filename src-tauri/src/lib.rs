@@ -1,4 +1,5 @@
 mod agent_bridge;
+mod agent_db;
 mod drag_out;
 mod ssh;
 mod tray;
@@ -6,6 +7,7 @@ mod tray;
 use ssh::{SessionMap, SshSession};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tauri::Manager;
 use tokio::sync::Mutex;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -16,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             tray::init(app)?;
+            app.manage(agent_db::init(app)?);
             Ok(())
         })
         .manage(SessionMap(Mutex::new(
@@ -44,7 +47,22 @@ pub fn run() {
             agent_bridge::agent_cancel,
             agent_bridge::agent_set_key,
             agent_bridge::agent_delete_key,
-            agent_bridge::agent_has_key
+            agent_bridge::agent_has_key,
+            agent_db::agent_sessions_list,
+            agent_db::agent_session_save,
+            agent_db::agent_sessions_delete,
+            agent_db::agent_entries_load,
+            agent_db::agent_entries_replace,
+            agent_db::agent_providers_list,
+            agent_db::agent_providers_save,
+            agent_db::agent_kv_get,
+            agent_db::agent_kv_set,
+            agent_db::agent_memories_list,
+            agent_db::agent_memory_add,
+            agent_db::agent_memory_update,
+            agent_db::agent_memory_delete,
+            agent_db::agent_memories_clear,
+            agent_db::agent_legacy_import
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
