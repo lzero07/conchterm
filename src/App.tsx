@@ -5,11 +5,14 @@ import {
   Copy,
   FolderOpen,
   Minus,
+  Moon,
   Pencil,
   Plus,
   Settings as SettingsIcon,
   Server,
   Square,
+  Sun,
+  SunMoon,
   Terminal,
   Trash2,
   X,
@@ -22,6 +25,7 @@ import ServerForm from "./components/ServerForm";
 import FileBrowser from "./components/FileBrowser";
 import SettingsView from "./components/SettingsView";
 import { DialogProvider, useDialogs } from "./components/Dialogs";
+import { ToastProvider, showThemeToast } from "./components/Toast";
 import AgentPanel from "./agent/AgentPanel";
 
 const MonitorView = lazy(() => import("./monitor/MonitorView"));
@@ -71,7 +75,9 @@ const AGENT_DOCK_OPEN_KEY = "agentDockOpen";
 export default function App() {
   return (
     <DialogProvider>
-      <AppShell />
+      <ToastProvider>
+        <AppShell />
+      </ToastProvider>
     </DialogProvider>
   );
 }
@@ -409,6 +415,34 @@ function AppShell() {
             onClick={toggleAgentDock}
           >
             <Bot size={20} strokeWidth={2} />
+          </button>
+          <button
+            className="title-ai"
+            title={
+              settings.themeMode === "dark"
+                ? "主题：暗色（点击切换到跟随系统）"
+                : settings.themeMode === "light"
+                  ? "主题：亮色（点击切换到暗色）"
+                  : "主题：跟随系统（点击切换到亮色）"
+            }
+            onClick={() => {
+              const next =
+                settings.themeMode === "light"
+                  ? "dark"
+                  : settings.themeMode === "dark"
+                    ? "system"
+                    : "light";
+              applySettings({ ...settings, themeMode: next });
+              showThemeToast(next);
+            }}
+          >
+            {settings.themeMode === "dark" ? (
+              <Moon size={17} strokeWidth={2} />
+            ) : settings.themeMode === "light" ? (
+              <Sun size={17} strokeWidth={2} />
+            ) : (
+              <SunMoon size={17} strokeWidth={2} />
+            )}
           </button>
           <button
             className="title-btn"

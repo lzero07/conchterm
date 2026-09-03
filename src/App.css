@@ -2097,3 +2097,47 @@ button.primary.danger:hover {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* ---------- 全局轻提示 Toast ---------- */
+/* 反色设计：暗色主题下用亮色弹框、亮色主题下用暗色弹框，形成强对比更醒目 */
+:root {
+  --toast-bg: #f1f2f5;
+  --toast-border: rgba(255, 255, 255, 0.35);
+  --toast-text: #23252b;
+  --toast-icon: #1fa971;
+  --toast-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+:root[data-theme="light"] {
+  --toast-bg: #26282f;
+  --toast-border: rgba(0, 0, 0, 0.35);
+  --toast-text: #f0f1f5;
+  --toast-icon: #4ade80;
+  --toast-shadow: 0 12px 32px rgba(15, 23, 42, 0.35);
+}
+.toast {
+  position: fixed;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3000;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 60vw;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--toast-bg);
+  border: 1px solid var(--toast-border);
+  box-shadow: var(--toast-shadow);
+  color: var(--toast-text);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: toast-in 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+.toast svg { flex-shrink: 0; color: var(--toast-icon); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-8px) scale(0.96); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+}
