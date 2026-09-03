@@ -19,6 +19,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             tray::init(app)?;
+            // 记录 resource 目录：生产态 agent 脚本按平台落在不同位置（macOS=Contents/Resources）
+            if let Ok(dir) = app.path().resource_dir() {
+                agent_bridge::set_resource_dir(dir);
+            }
             app.manage(usage_db::init(app)?);
             app.manage(agent_db::init(app)?);
             Ok(())

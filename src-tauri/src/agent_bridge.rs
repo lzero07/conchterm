@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -150,6 +150,14 @@ fn read_api_key(provider_id: &str) -> Result<String, String> {
 
 // ---------- Python sidecar 进程管理 ----------
 
+/// 打包资源根目录（setup 阶段写入；各平台 resource 落点不同，见 agent_script）
+static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// 记录 Tauri resource 目录，供生产态定位随包分发的 agent 脚本
+pub fn set_resource_dir(dir: PathBuf) {
+    let _ = RESOURCE_DIR.set(dir);
+}
+
 fn agent_script() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("CONCH_AGENT_SCRIPT") {
         let path = PathBuf::from(path);
@@ -162,7 +170,14 @@ fn agent_script() -> Option<PathBuf> {
     if dev.exists() {
         return Some(dev);
     }
-    // 生产态：exe 同级目录
+    // 生产态：bundle.resources 落点（macOS=Contents/Resources，Linux=/usr/lib/<app>）
+    if let Some(dir) = RESOURCE_DIR.get() {
+        let bundled = dir.join("agent/main.py");
+        if bundled.exists() {
+            return Some(bundled);
+        }
+    }
+    // 生产态兜底：exe 同级目录（Windows NSIS/MSI 把 resources 放在 exe 旁）
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let bundled = exe_dir.join("agent/main.py");
     bundled.exists().then_some(bundled)
