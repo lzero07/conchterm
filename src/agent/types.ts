@@ -35,7 +35,7 @@ export interface TokenUsage {
   total_tokens: number;
 }
 
-/** Rust 端转发的 Python 流式事件 */
+/** Rust 端产出的流式事件 */
 export interface AgentEvent {
   type: "delta" | "done" | "error" | "tool_call" | "models";
   id: string;
@@ -69,7 +69,7 @@ export interface MessageEntry {
 export interface ToolEntry {
   kind: "tool";
   id: string;
-  /** Python 侧的调用 id（tool_result 回传用） */
+  /** Rust 侧的调用 id（tool_result 回传用） */
   callId: string;
   /** 所属请求 id */
   requestId: string;

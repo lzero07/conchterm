@@ -21,7 +21,7 @@ export function agentHasKey(providerId: string): Promise<boolean> {
 }
 
 /** 发起聊天；onEvent 接收流式增量，resolve 返回请求 id 用于取消。
- *  maxRounds 透传 Python 侧 Agent 工具调用轮数上限。 */
+ *  maxRounds 透传 Agent 工具调用轮数上限。 */
 export function agentChat(
   provider: AgentProvider,
   messages: AgentChatMessage[],
@@ -46,7 +46,7 @@ export function agentChat(
   });
 }
 
-/** 拉取 Provider 可用模型列表（经 Python sidecar 调 /models 接口）。
+/** 拉取 Provider 可用模型列表（直连 /models 接口）。
  *  apiKeyOverride：编辑表单里尚未保存的 Key，优先于凭据管理器中已存的。 */
 export function agentListModels(
   provider: AgentProvider,

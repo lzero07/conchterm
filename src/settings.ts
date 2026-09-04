@@ -112,7 +112,7 @@ export interface AppSettings {
   tabOverflow: TabOverflow;
   trayIcon: boolean;
   // ---------- AI ----------
-  /** Agent 模式单回合最大工具调用轮数（Python 侧护栏） */
+  /** Agent 模式单回合最大工具调用轮数（后端护栏） */
   agentMaxRounds: number;
   /** 遇到瞬时 AI 错误（限流/超时/网络波动）的自动重试次数 */
   aiMaxRetries: number;

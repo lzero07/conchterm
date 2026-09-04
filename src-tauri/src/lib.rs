@@ -1,6 +1,7 @@
 mod agent_bridge;
 mod agent_db;
 mod drag_out;
+mod llm;
 mod ssh;
 mod tray;
 mod usage_db;
@@ -19,10 +20,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             tray::init(app)?;
-            // 记录 resource 目录：生产态 agent 脚本按平台落在不同位置（macOS=Contents/Resources）
-            if let Ok(dir) = app.path().resource_dir() {
-                agent_bridge::set_resource_dir(dir);
-            }
             app.manage(usage_db::init(app)?);
             app.manage(agent_db::init(app)?);
             Ok(())
@@ -30,7 +27,7 @@ pub fn run() {
         .manage(SessionMap(Mutex::new(
             HashMap::<String, Arc<SshSession>>::new(),
         )))
-        .manage(agent_bridge::AgentState::default())
+        .manage(agent_bridge::AgentState::new().expect("初始化 LLM 客户端失败"))
         .invoke_handler(tauri::generate_handler![
             ssh::ssh_connect,
             ssh::ssh_write,
