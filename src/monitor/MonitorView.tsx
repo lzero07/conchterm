@@ -127,6 +127,8 @@ function buildTrendOption(
       {
         name: "输入",
         type: "line",
+        smooth: true,
+        smoothMonotone: "x",
         data: input,
         showSymbol: false,
         lineStyle: { width: 2, color: colors.input },
@@ -136,6 +138,8 @@ function buildTrendOption(
       {
         name: "输出",
         type: "line",
+        smooth: true,
+        smoothMonotone: "x",
         data: output,
         showSymbol: false,
         lineStyle: { width: 2, color: colors.output },
