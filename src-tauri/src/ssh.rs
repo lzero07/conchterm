@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use russh::client::{self, Handler};
@@ -121,6 +121,8 @@ pub struct SshSession {
     terminated: Arc<AtomicBool>,
     /// SFTP 独立连接（懒加载）
     sftp: Mutex<Option<Arc<SftpClient>>>,
+    /// Agent 命令的工作目录（每次 exec 都是新通道，靠前缀 cd 延续目录状态）
+    agent_cwd: Mutex<Option<String>>,
     /// 系统状态监控连接代数：0=未启动；用于停止旧监控任务
     sysstat_gen: AtomicU32,
 }
@@ -248,6 +250,7 @@ pub async fn ssh_connect(
         channel_writer,
         terminated,
         sftp: Mutex::new(None),
+        agent_cwd: Mutex::new(None),
         sysstat_gen: AtomicU32::new(0),
     });
 
@@ -380,14 +383,63 @@ pub async fn ssh_exec(
         return Err("终端会话已断开，无法执行命令；请在侧栏重新连接后再试".to_string());
     }
 
-    match exec_on_handle(&session.handle, command.clone()).await {
-        Ok(output) => Ok(output),
-        Err(reuse_err) => match connect_exec(&session.params, command).await {
-            Ok(output) => Ok(output),
-            Err(_) => Err(reuse_err),
+    // exec 通道每次都是全新 shell（从 home 开始），cd 等目录状态无法延续：
+    // 记住上次工作目录，前缀 cd 恢复，结尾打标记行回收本次的 $PWD
+    let cwd = session.agent_cwd.lock().await.clone();
+    let (wrapped, marker) = wrap_with_cwd(&command, cwd.as_deref());
+
+    let output = match exec_on_handle(&session.handle, wrapped.clone()).await {
+        Ok(output) => output,
+        Err(reuse_err) => match connect_exec(&session.params, wrapped).await {
+            Ok(output) => output,
+            Err(_) => return Err(reuse_err),
         },
+    };
+
+    // 从输出尾部回收工作目录：cd 生效后续命令自动在正确目录执行
+    let (text, next_cwd) = strip_cwd_marker(&output, &marker);
+    if let Some(dir) = next_cwd {
+        *session.agent_cwd.lock().await = Some(dir);
     }
+    Ok(text)
 }
+
+/// 包装命令：恢复上次工作目录 + 结尾输出带标记的 $PWD。
+/// cd 失败（目录已删等）时忽略、保持原目录继续执行用户命令。
+fn wrap_with_cwd(command: &str, cwd: Option<&str>) -> (String, String) {
+    let marker = format!("__CONCH_PWD_{}__", NEXT_EXEC_MARKER.fetch_add(1, Ordering::Relaxed));
+    let prefix = match cwd {
+        Some(dir) => format!("cd {:?} 2>/dev/null; ", dir),
+        None => String::new(),
+    };
+    // 标记行独占一行输出：只认「行首到行尾整行匹配」，避免误伤命令自身输出
+    let wrapped = format!(
+        "{prefix}{{ {command} ; }}\nprintf '\\n{marker}%s\\n' \"$PWD\"",
+    );
+    (wrapped, marker)
+}
+
+/// 剥掉标记行，返回 (干净输出, 解析到的新工作目录)
+fn strip_cwd_marker(output: &str, marker: &str) -> (String, Option<String>) {
+    // 输出可能被截断（EXEC_OUTPUT_LIMIT），从尾部往前找完整标记行
+    if let Some(pos) = output.rfind(marker) {
+        let before = &output[..pos];
+        let after = &output[pos + marker.len()..];
+        let pwd = after.trim();
+        // 标记必须独占一行（前面是换行或输出开头），pwd 是单行有效路径
+        let at_line_start = before.is_empty() || before.ends_with('\n');
+        if at_line_start && !pwd.is_empty() && !pwd.contains('\n') {
+            let mut clean = before.trim_end_matches('\n').to_string();
+            if !clean.is_empty() {
+                clean.push('\n');
+            }
+            return (clean, Some(pwd.to_string()));
+        }
+    }
+    (output.to_string(), None)
+}
+
+static NEXT_EXEC_MARKER: AtomicU64 = AtomicU64::new(1);
 
 /// 在现有连接上开 exec 通道执行
 async fn exec_on_handle(
@@ -1272,6 +1324,71 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- Agent cd 跟踪 ----------
+
+    #[test]
+    fn cwd_wrap_first_exec_has_no_prefix() {
+        let (wrapped, marker) = wrap_with_cwd("ls", None);
+        assert!(!wrapped.starts_with("cd "), "首次执行不应前缀 cd: {wrapped}");
+        assert!(wrapped.contains("ls"));
+        assert!(wrapped.contains(&marker));
+        assert!(wrapped.contains("$PWD"));
+    }
+
+    #[test]
+    fn cwd_wrap_restores_previous_dir() {
+        let (wrapped, marker) = wrap_with_cwd("ls", Some("/var/log"));
+        assert!(wrapped.starts_with("cd \"/var/log\" 2>/dev/null; "), "{wrapped}");
+        assert!(wrapped.contains(&marker));
+    }
+
+    #[test]
+    fn cwd_strip_recovers_pwd() {
+        let marker = "__CONCH_PWD_1__";
+        let output = "file1\nfile2\n[exit code: 0]\n__CONCH_PWD_1__/var/log\n";
+        let (clean, cwd) = strip_cwd_marker(output, marker);
+        assert_eq!(clean, "file1\nfile2\n[exit code: 0]\n");
+        assert_eq!(cwd.as_deref(), Some("/var/log"));
+    }
+
+    #[test]
+    fn cwd_strip_without_trailing_newline() {
+        let marker = "__CONCH_PWD_1__";
+        let output = "ok\n__CONCH_PWD_1__/home/user";
+        let (clean, cwd) = strip_cwd_marker(output, marker);
+        assert_eq!(clean, "ok\n");
+        assert_eq!(cwd.as_deref(), Some("/home/user"));
+    }
+
+    #[test]
+    fn cwd_strip_empty_command_output() {
+        let marker = "__CONCH_PWD_1__";
+        let output = "[exit code: 0]\n__CONCH_PWD_1__/root\n";
+        let (clean, cwd) = strip_cwd_marker(output, marker);
+        assert_eq!(clean, "[exit code: 0]\n");
+        assert_eq!(cwd.as_deref(), Some("/root"));
+    }
+
+    #[test]
+    fn cwd_marker_inside_user_output_ignored() {
+        // 用户输出里恰含 marker 字样但不在行首：不剥、不更新目录
+        let marker = "__CONCH_PWD_1__";
+        let output = "echo __CONCH_PWD_1__/etc\n[exit code: 0]\n";
+        let (clean, cwd) = strip_cwd_marker(output, marker);
+        assert_eq!(clean, output);
+        assert!(cwd.is_none());
+    }
+
+    #[test]
+    fn cwd_marker_truncated_no_pwd_keeps_output() {
+        // 截断后只剩 marker 本体、pwd 丢失：不更新目录，输出原样
+        let marker = "__CONCH_PWD_1__";
+        let output = "data\n__CONCH_PWD_1__";
+        let (clean, cwd) = strip_cwd_marker(output, marker);
+        assert_eq!(clean, output);
+        assert!(cwd.is_none());
+    }
 
     #[test]
     fn parse_full_block() {
