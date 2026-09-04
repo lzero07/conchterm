@@ -117,3 +117,29 @@ export function prepareFileDrag(
 export function startFileDrag(localPath: string): Promise<void> {
   return invoke("start_file_drag", { localPath });
 }
+
+/** 一次系统状态采样（滑动窗口差分后的展示值） */
+export interface SysstatSample {
+  cpuPercent: number;
+  memUsedMb: number;
+  memTotalMb: number;
+  /** 接收速率 字节/秒 */
+  rxBps: number;
+  txBps: number;
+  uptimeSecs: number;
+  user: string;
+}
+
+/** 会话断开/重连后事件里的采样可能缺字段 */
+export interface SysstatUpdate {
+  sessionId: string;
+  sample: Partial<SysstatSample>;
+}
+
+export function sysstatStart(sessionId: string): Promise<void> {
+  return invoke("sysstat_start", { sessionId });
+}
+
+export function sysstatStop(sessionId: string): Promise<void> {
+  return invoke("sysstat_stop", { sessionId });
+}

@@ -439,7 +439,84 @@ body.resizing { cursor: col-resize; }
   display: flex;
   flex-direction: column;
 }
-.terminal-pane { position: absolute; inset: 0; }
+.terminal-pane {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-pane-main {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+.terminal-pane-main > .terminal-container {
+  position: absolute;
+  inset: 0;
+}
+
+/* ---------- 会话状态栏（FinalShell 风格） ---------- */
+.session-status-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 26px;
+  padding: 0 10px;
+  background: var(--bg-1);
+  border-top: 1px solid var(--border-soft);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  user-select: none;
+}
+.ss-gauge { flex: none; }
+.ss-mem {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.ss-mem-bar {
+  display: inline-block;
+  width: 60px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  overflow: hidden;
+  flex: none;
+}
+.ss-mem-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  transition: width .5s ease, background-color .5s ease;
+}
+.ss-mem-text {
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ss-net {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.ss-net-arrow { font-size: 12px; line-height: 1; }
+.ss-net-arrow.down { color: #3fb950; }
+.ss-net-arrow.up { color: #d29922; }
+.ss-uptime,
+.ss-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.ss-uptime { margin-left: auto; }
+.ss-user { margin-right: 2px; }
 
 .terminal-container {
   width: 100%;

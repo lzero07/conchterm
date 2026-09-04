@@ -21,6 +21,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import TerminalView from "./components/TerminalView";
+import SessionStatusBar from "./components/SessionStatusBar";
 import ServerForm from "./components/ServerForm";
 import FileBrowser from "./components/FileBrowser";
 import SettingsView from "./components/SettingsView";
@@ -357,21 +358,24 @@ function AppShell() {
         <div
           key={t.key}
           className="terminal-pane"
-          style={{ display: t.key === activeKey ? "block" : "none" }}
+          style={{ display: t.key === activeKey ? "flex" : "none" }}
         >
-          <TerminalView
-            sessionKey={t.key}
-            params={t.params}
-            appearance={terminalAppearance}
-            ctrlWheelZoom={effectiveSettings.ctrlWheelZoom}
-            onStatus={(status) =>
-              setSessionStatus((prev) => ({ ...prev, [t.key]: status }))
-            }
-          />
+          <div className="terminal-pane-main">
+            <TerminalView
+              sessionKey={t.key}
+              params={t.params}
+              appearance={terminalAppearance}
+              ctrlWheelZoom={effectiveSettings.ctrlWheelZoom}
+              onStatus={(status) =>
+                setSessionStatus((prev) => ({ ...prev, [t.key]: status }))
+              }
+            />
+          </div>
+          <SessionStatusBar sessionId={t.key} connected={sessionStatus[t.key] === "connected"} />
         </div>
       )),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [tabs.map((t) => t.key).join(","), activeKey, terminalAppearance]
+    [tabs.map((t) => t.key).join(","), activeKey, terminalAppearance, sessionStatus]
   );
 
   return (

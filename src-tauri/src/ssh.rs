@@ -6,9 +6,9 @@
 //! - 输出数据通过 Tauri ipc::Channel 以二进制推送给前端（xterm.js 直接 write Uint8Array）
 //! - 键盘输入由前端 invoke("ssh_write") 发过来，写入 channel stdin
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use russh::client::{self, Handler};
@@ -121,6 +121,8 @@ pub struct SshSession {
     terminated: Arc<AtomicBool>,
     /// SFTP 独立连接（懒加载）
     sftp: Mutex<Option<Arc<SftpClient>>>,
+    /// 系统状态监控连接代数：0=未启动；用于停止旧监控任务
+    sysstat_gen: AtomicU32,
 }
 
 impl SshSession {
@@ -246,6 +248,7 @@ pub async fn ssh_connect(
         channel_writer,
         terminated,
         sftp: Mutex::new(None),
+        sysstat_gen: AtomicU32::new(0),
     });
 
     // 后台任务：把远端输出持续推给前端
@@ -339,6 +342,8 @@ pub async fn ssh_disconnect(
     sessions: State<'_, SessionMap>,
 ) -> Result<(), String> {
     if let Some(s) = sessions.0.lock().await.remove(&session_id) {
+        // 先停监控任务再断连接，避免监控流触发重复的 session-closed
+        stop_sysstat(&s).await;
         s.close_sftp().await;
         let handle = s.handle.lock().await;
         let _ = handle
@@ -887,4 +892,388 @@ pub async fn sftp_exists(
             .map_err(|e| format!("检查文件失败: {e}"))?
     };
     Ok(exists)
+}
+
+// ==================== 系统状态监控（FinalShell 风格状态栏） ====================
+
+/// 每个采样值由 N 拍差分平滑（滑动窗口），抹平单拍抖动；
+/// 窗口按秒数近似：采样间隔 1s，保留最近 SYSSTAT_WINDOW 拍
+const SYSSTAT_WINDOW: usize = 3;
+const SYSSTAT_SAMPLE_INTERVAL_MS: u64 = 1000;
+
+/// 远端采样循环：POSIX sh，每秒输出一个 BEGIN 分隔的快照块。
+/// 不依赖 bash/procps；字段缺失时解析端跳过该指标。
+/// 首块附带 who 输出（当前登录用户），解析端只取一次
+const SYSSTAT_CMD: &str = r#"who 2>/dev/null | head -1
+while true; do
+echo "===BEGIN==="
+cat /proc/uptime 2>/dev/null
+echo "--STAT--"
+cat /proc/stat 2>/dev/null
+echo "--MEM--"
+cat /proc/meminfo 2>/dev/null
+echo "--NET--"
+cat /proc/net/dev 2>/dev/null
+echo "===END==="
+sleep 1
+done"#;
+
+/// 一次采样的原始计数器（差分前）
+#[derive(Default, Clone)]
+struct SysstatRaw {
+    /// /proc/uptime 第一个字段，秒
+    uptime_secs: Option<f64>,
+    /// /proc/stat 各列累计 jiffies
+    cpu_total: Option<u64>,
+    cpu_idle: Option<u64>,
+    mem_total_kb: Option<u64>,
+    mem_available_kb: Option<u64>,
+    /// 全网卡 rx/tx 字节累计
+    rx_bytes: Option<u64>,
+    tx_bytes: Option<u64>,
+    /// 登录用户（who 的第一行首列，快照直出非差分）
+    user: Option<String>,
+}
+
+/// 滑动窗口内的差分结果，推给前端展示
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SysstatSample {
+    cpu_percent: f64,
+    mem_used_mb: u64,
+    mem_total_mb: u64,
+    /// 接收速率 字节/秒（窗口均值）
+    rx_bps: f64,
+    tx_bps: f64,
+    uptime_secs: u64,
+    user: String,
+}
+
+fn parse_proc_block<'a>(
+    lines: &mut impl Iterator<Item = &'a str>,
+    end: &str,
+) -> (&'a str, SysstatRaw) {
+    let mut raw = SysstatRaw::default();
+    let mut last = "";
+    for line in lines.by_ref() {
+        if line == end {
+            break;
+        }
+        last = line;
+        if let Some(rest) = line.strip_prefix("cpu ") {
+            let mut it = rest.split_whitespace();
+            let mut total = 0u64;
+            let mut idle = 0u64;
+            for (i, f) in it.by_ref().enumerate() {
+                if let Ok(v) = f.parse::<u64>() {
+                    total += v;
+                    if i == 3 {
+                        idle = v; // user nice system idle -> 第 4 列 idle
+                    }
+                    if i == 4 {
+                        idle += v; // iowait 也算空闲
+                    }
+                }
+            }
+            raw.cpu_total = Some(total);
+            raw.cpu_idle = Some(idle);
+        } else if let Some(rest) = line.strip_prefix("MemTotal:") {
+            raw.mem_total_kb = rest.trim().split_whitespace().next().and_then(|v| v.parse().ok());
+        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            raw.mem_available_kb = rest.trim().split_whitespace().next().and_then(|v| v.parse().ok());
+        } else if line.contains('|') {
+            // /proc/net/dev 数据行： "  eth0: 12345 packets  ...  67890 packets ..."
+            let mut parts = line.split(':');
+            let _iface = parts.next();
+            if let Some(nums) = parts.next() {
+                let vals: Vec<u64> = nums
+                    .split_whitespace()
+                    .filter_map(|v| v.parse().ok())
+                    .collect();
+                if vals.len() >= 9 {
+                    let add = |acc: &mut Option<u64>, v: u64| {
+                        *acc = Some(acc.unwrap_or(0) + v);
+                    };
+                    add(&mut raw.rx_bytes, vals[0]);
+                    add(&mut raw.tx_bytes, vals[8]);
+                }
+            }
+        } else if raw.uptime_secs.is_none() {
+            // uptime 块第一行："13245.78 51234.02"
+            if let Some(first) = line.split_whitespace().next() {
+                if let Ok(v) = first.parse::<f64>() {
+                    raw.uptime_secs = Some(v);
+                }
+            }
+        }
+    }
+    (last, raw)
+}
+
+/// 解析一个完整的 ===BEGIN===...===END=== 块
+fn parse_sysstat_block(block: &str) -> SysstatRaw {
+    let mut raw = SysstatRaw::default();
+    let mut lines = block.lines().peekable();
+    while let Some(line) = lines.peek() {
+        let line = *line;
+        if line == "--STAT--" {
+            lines.next();
+            parse_proc_block(&mut lines, "--MEM--");
+        } else if line == "--MEM--" {
+            lines.next();
+            parse_proc_block(&mut lines, "--NET--");
+        } else if line == "--NET--" {
+            lines.next();
+            parse_proc_block(&mut lines, "===END===");
+        } else if line == "===BEGIN===" || line.is_empty() {
+            lines.next();
+        } else {
+            // uptime 行（块首）或 who 输出
+            lines.next();
+            if raw.uptime_secs.is_none() {
+                if let Some(first) = line.split_whitespace().next() {
+                    if let Ok(v) = first.parse::<f64>() {
+                        raw.uptime_secs = Some(v);
+                    } else if !line.is_empty() && !line.starts_with("===END===") {
+                        // 可能是 who 输出
+                        raw.user = Some(line.split_whitespace().next().unwrap_or("").to_string());
+                    }
+                }
+            }
+        }
+    }
+    raw
+}
+
+/// 滑动窗口：累计最近 N 拍做一次差分（首尾差 / 时间差）
+struct SysstatWindow {
+    raws: VecDeque<(SysstatRaw, std::time::Instant)>,
+}
+
+impl SysstatWindow {
+    fn new() -> Self {
+        Self {
+            raws: VecDeque::with_capacity(SYSSTAT_WINDOW + 1),
+        }
+    }
+
+    fn push(&mut self, raw: SysstatRaw) -> Option<SysstatSample> {
+        let now = std::time::Instant::now();
+        self.raws.push_back((raw, now));
+        if self.raws.len() > SYSSTAT_WINDOW {
+            self.raws.pop_front();
+        }
+        let n = self.raws.len();
+        if n < 2 {
+            return None;
+        }
+        let (first, t0) = self.raws.front().unwrap();
+        let (last, t1) = self.raws.back().unwrap();
+        let dt = t1.duration_since(*t0).as_secs_f64();
+        if dt <= 0.0 {
+            return None;
+        }
+        let cpu_percent = match (first.cpu_total, first.cpu_idle, last.cpu_total, last.cpu_idle) {
+            (Some(t0v), Some(i0v), Some(t1v), Some(i1v)) => {
+                let d_total = t1v.saturating_sub(t0v) as f64;
+                let d_idle = i1v.saturating_sub(i0v) as f64;
+                if d_total > 0.0 {
+                    ((d_total - d_idle) / d_total * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        };
+        let (rx_bps, tx_bps) = match (first.rx_bytes, first.tx_bytes, last.rx_bytes, last.tx_bytes)
+        {
+            (Some(r0), Some(x0), Some(r1), Some(x1)) => {
+                // 计数器回卷（重启）时忽略该窗口
+                (
+                    r1.saturating_sub(r0) as f64 / dt,
+                    x1.saturating_sub(x0) as f64 / dt,
+                )
+            }
+            _ => (0.0, 0.0),
+        };
+        let mem_total_kb = last.mem_total_kb.unwrap_or(0);
+        let mem_used_kb = last
+            .mem_total_kb
+            .and_then(|t| last.mem_available_kb.map(|a| t.saturating_sub(a)))
+            .unwrap_or(0);
+        Some(SysstatSample {
+            cpu_percent,
+            mem_used_mb: mem_used_kb / 1024,
+            mem_total_mb: mem_total_kb / 1024,
+            rx_bps,
+            tx_bps,
+            uptime_secs: last.uptime_secs.map(|v| v as u64).unwrap_or(0),
+            user: last.user.clone().unwrap_or_default(),
+        })
+    }
+}
+
+/// 启动监控连接的采样流，事件推给前端
+#[tauri::command]
+pub async fn sysstat_start(
+    session_id: String,
+    app: tauri::AppHandle,
+    sessions: State<'_, SessionMap>,
+) -> Result<(), String> {
+    let session = sessions
+        .0
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "会话不存在".to_string())?;
+    if session.terminated.load(Ordering::Relaxed) {
+        return Err("会话已断开".to_string());
+    }
+
+    let new_gen = session.sysstat_gen.fetch_add(1, Ordering::Relaxed) + 1;
+    session.sysstat_gen.store(new_gen, Ordering::Relaxed);
+
+    let params = session.params.clone();
+    let session_id_cloned = session_id.clone();
+    let app_cloned = app.clone();
+    let session_cloned = session.clone();
+    tokio::spawn(async move {
+        use tauri::Emitter;
+        let _ = run_sysstat_stream(&params, &session_id_cloned, &app_cloned, new_gen).await;
+        // 仅当本流仍是该会话的最新监控流时才通知前端隐藏状态栏；
+        // 被 stop/重启动/会话顶替后 gen 已变，旧流的退出事件会被跳过
+        if session_cloned.sysstat_gen.load(Ordering::Relaxed) == new_gen {
+            let _ = app_cloned.emit(
+                "sysstat-stopped",
+                serde_json::json!({ "sessionId": session_id_cloned }),
+            );
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn sysstat_stop(
+    session_id: String,
+    sessions: State<'_, SessionMap>,
+) -> Result<(), String> {
+    if let Some(s) = sessions.0.lock().await.get(&session_id) {
+        stop_sysstat(s).await;
+    }
+    Ok(())
+}
+
+async fn stop_sysstat(session: &SshSession) {
+    // 递增代数：监控流发现代数不匹配即自行退出并断开连接
+    let old_gen = session.sysstat_gen.fetch_add(1, Ordering::Relaxed) + 1;
+    let _ = old_gen;
+}
+
+/// 打开独立监控连接，逐块读采样输出，差分后推 `sysstat-update` 事件。
+/// my_gen 是本流启动时的监控代数：会话表中的代数与之不符（被 stop/顶替/移除）
+/// 时自行退出
+async fn run_sysstat_stream(
+    params: &ConnectParams,
+    session_id: &str,
+    app: &tauri::AppHandle,
+    my_gen: u32,
+) -> Result<(), String> {
+    let mut handle = client::connect(
+        ssh_config(),
+        (params.host.as_str(), params.port),
+        ClientHandler,
+    )
+    .await
+    .map_err(|e| format!("监控连接失败: {e}"))?;
+    authenticate(&mut handle, params).await?;
+
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|e| format!("打开监控通道失败: {e}"))?;
+
+    channel
+        .exec(true, SYSSTAT_CMD.to_string())
+        .await
+        .map_err(|e| format!("启动采样失败: {e}"))?;
+
+    use tauri::Emitter;
+    use tokio::io::AsyncReadExt;
+
+    let mut window = SysstatWindow::new();
+    let mut remote_user = String::new();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut stream = channel.into_stream();
+
+    loop {
+        if get_sysstat_gen(session_id, app).await != my_gen {
+            break;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(SYSSTAT_SAMPLE_INTERVAL_MS * 15),
+            stream.read(&mut chunk),
+        )
+        .await
+        {
+            Err(_) => break, // 读超时：远端无响应，退出
+            Ok(Err(_)) => break,
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => buf.extend_from_slice(&chunk[..n]),
+        }
+        // 尝试从缓冲中提取完整块
+        while let Some(pos) = find_subsequence(&buf, b"===END===\n") {
+            let block_bytes: Vec<u8> = buf.drain(..pos + b"===END===\n".len()).collect();
+            let block = String::from_utf8_lossy(&block_bytes);
+            let raw = parse_sysstat_block(&block);
+            // who 输出位于首个 ===BEGIN=== 之前的导语区，只取一次
+            if remote_user.is_empty() {
+                let preamble = block.split("===BEGIN===").next().unwrap_or("");
+                if let Some(line) = preamble.lines().find(|l| !l.trim().is_empty()) {
+                    if let Some(first) = line.split_whitespace().next() {
+                        remote_user = first.to_string();
+                    }
+                }
+            }
+            if let Some(mut sample) = window.push(raw) {
+                if sample.user.is_empty() {
+                    sample.user = remote_user.clone();
+                }
+                let _ = app.emit(
+                    "sysstat-update",
+                    serde_json::json!({
+                        "sessionId": session_id,
+                        "sample": sample,
+                    }),
+                );
+            }
+        }
+    }
+
+    let _ = handle
+        .disconnect(Disconnect::ByApplication, "sysstat stop", "")
+        .await;
+    Ok(())
+}
+
+/// 监控流运行期间轮询会话的监控代数；会话被顶替/断开/停止时 gen 已变，流自行退出
+async fn get_sysstat_gen(session_id: &str, app: &tauri::AppHandle) -> u32 {
+    use tauri::Manager;
+    let sessions = app.state::<SessionMap>();
+    let gen = sessions
+        .0
+        .lock()
+        .await
+        .get(session_id)
+        .map(|s| s.sysstat_gen.load(Ordering::Relaxed))
+        .unwrap_or(0);
+    drop(sessions);
+    gen
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle)
 }

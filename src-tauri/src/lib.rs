@@ -44,6 +44,8 @@ pub fn run() {
             ssh::sftp_upload,
             ssh::sftp_download,
             ssh::sftp_exists,
+            ssh::sysstat_start,
+            ssh::sysstat_stop,
             drag_out::prepare_file_drag,
             drag_out::start_file_drag,
             tray::set_tray_visible,
