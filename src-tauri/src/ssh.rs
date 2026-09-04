@@ -407,15 +407,16 @@ pub async fn ssh_exec(
 /// 包装命令：恢复上次工作目录 + 结尾输出带标记的 $PWD。
 /// cd 失败（目录已删等）时忽略、保持原目录继续执行用户命令。
 fn wrap_with_cwd(command: &str, cwd: Option<&str>) -> (String, String) {
-    let marker = format!("__CONCH_PWD_{}__", NEXT_EXEC_MARKER.fetch_add(1, Ordering::Relaxed));
+    let marker = format!(
+        "__CONCH_PWD_{}__",
+        NEXT_EXEC_MARKER.fetch_add(1, Ordering::Relaxed)
+    );
     let prefix = match cwd {
         Some(dir) => format!("cd {:?} 2>/dev/null; ", dir),
         None => String::new(),
     };
     // 标记行独占一行输出：只认「行首到行尾整行匹配」，避免误伤命令自身输出
-    let wrapped = format!(
-        "{prefix}{{ {command} ; }}\nprintf '\\n{marker}%s\\n' \"$PWD\"",
-    );
+    let wrapped = format!("{prefix}{{ {command} ; }}\nprintf '\\n{marker}%s\\n' \"$PWD\"",);
     (wrapped, marker)
 }
 
@@ -1330,7 +1331,10 @@ mod tests {
     #[test]
     fn cwd_wrap_first_exec_has_no_prefix() {
         let (wrapped, marker) = wrap_with_cwd("ls", None);
-        assert!(!wrapped.starts_with("cd "), "首次执行不应前缀 cd: {wrapped}");
+        assert!(
+            !wrapped.starts_with("cd "),
+            "首次执行不应前缀 cd: {wrapped}"
+        );
         assert!(wrapped.contains("ls"));
         assert!(wrapped.contains(&marker));
         assert!(wrapped.contains("$PWD"));
@@ -1339,7 +1343,10 @@ mod tests {
     #[test]
     fn cwd_wrap_restores_previous_dir() {
         let (wrapped, marker) = wrap_with_cwd("ls", Some("/var/log"));
-        assert!(wrapped.starts_with("cd \"/var/log\" 2>/dev/null; "), "{wrapped}");
+        assert!(
+            wrapped.starts_with("cd \"/var/log\" 2>/dev/null; "),
+            "{wrapped}"
+        );
         assert!(wrapped.contains(&marker));
     }
 
