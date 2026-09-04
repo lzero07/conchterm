@@ -361,11 +361,43 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     );
   };
 
+  // delta 渲染合并：token 级事件直达 state 会逐字触发全量渲染（对话越长越卡）。
+  // 这里按气泡缓冲增量，rAF 每帧最多 flush 一次，渲染锁 60fps、文字成段出现
+  const deltaBufRef = useRef<Map<string, string>>(new Map());
+  const deltaFrameRef = useRef<number | null>(null);
+
+  const appendDelta = (entryId: string, text: string) => {
+    deltaBufRef.current.set(entryId, (deltaBufRef.current.get(entryId) ?? "") + text);
+    if (deltaFrameRef.current !== null) return;
+    deltaFrameRef.current = requestAnimationFrame(() => {
+      deltaFrameRef.current = null;
+      const buf = deltaBufRef.current;
+      for (const [id, chunk] of buf) {
+        buf.delete(id);
+        updateMessage(id, (e) => ({ ...e, content: e.content + chunk }));
+      }
+    });
+  };
+
+  /** 流结束/取消时立即落盘缓冲中的尾部增量，避免最后一段文字丢失 */
+  const flushDeltas = () => {
+    if (deltaFrameRef.current !== null) {
+      cancelAnimationFrame(deltaFrameRef.current);
+      deltaFrameRef.current = null;
+    }
+    const buf = deltaBufRef.current;
+    for (const [id, chunk] of buf) {
+      buf.delete(id);
+      updateMessage(id, (e) => ({ ...e, content: e.content + chunk }));
+    }
+  };
+
   const toggleTool = (callId: string) => {
     updateTool(callId, (t) => ({ ...t, collapsed: !t.collapsed }));
   };
 
   const finishStream = () => {
+    flushDeltas();
     activeStreamRef.current = null;
     setBusy(false);
   };
@@ -376,10 +408,7 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
 
     if (event.type === "delta") {
       if (stream.cancelled) return;
-      updateMessage(stream.messageEntryId, (e) => ({
-        ...e,
-        content: e.content + (event.content ?? ""),
-      }));
+      appendDelta(stream.messageEntryId, event.content ?? "");
       return;
     }
     if (event.type === "tool_call") {
@@ -489,9 +518,14 @@ export default function AgentPanel({ sessions, activeTerminalId, aiSettings }: P
     // 全局自定义指令（设置页）以显式包裹注入 system prompt——
     // 弱模型对无标记的追加段落容易忽略，明确边界能显著提高遵循率
     const instruction = aiSettings.customInstruction.trim();
-    // 长期记忆：置顶优先，最多 30 条注入，避免挤占上下文
+    // 长期记忆：手动记忆全局生效；自动记忆按来源会话隔离——
+    // 只注入当前会话提取出的记忆，新会话从零开始（不带历史会话的上下文）
     const memoryLines = memories
-      .filter((m) => m.enabled)
+      .filter(
+        (m) =>
+          m.enabled &&
+          (m.source === "manual" || m.sessionId === activeSessionId)
+      )
       .slice(0, 30)
       .map((m) => `- ${m.content}`)
       .join("\n");

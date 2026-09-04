@@ -7,10 +7,12 @@ import { dbAddMemory, dbListMemories, type MemoryItem } from "./db";
 import type { AgentEntry, AgentProvider } from "./types";
 
 const EXTRACT_SYSTEM_PROMPT =
-  "你是对话记忆提取器。从用户与助手的对话中提取值得跨会话长期记住的信息，" +
-  "只提取持久性内容：用户的偏好、习惯、服务器/环境事实、常用配置等。" +
-  "不要提取：寒暄、一次性任务、临时问题、常识。" +
-  '严格输出 JSON：{"memories": ["一句话记忆", ...]}，最多 5 条，每条不超过 200 字；' +
+  "你是对话记忆提取器。从用户与助手的对话中提取值得跨会话长期记住的信息。" +
+  "只提取与用户本人绑定的持久事实：用户姓名/称呼、职业、语言偏好、常用工具链、" +
+  "服务器环境的不变特征（主机名、发行版、固定配置）等。" +
+  "不要提取：寒暄、一次性任务、临时问题、常识、任务执行进度、" +
+  "会随时变化的系统状态（磁盘占用/内存/CPU/清理了多少空间）、当前对话的待办事项。" +
+  '严格输出 JSON：{"memories": ["一句话记忆", ...]}，最多 3 条，每条不超过 200 字；' +
   "没有值得记住的内容就输出 {\"memories\": []}。不要输出 JSON 以外的任何文字。";
 
 const MAX_EXTRACT_MESSAGES = 8;
@@ -76,6 +78,14 @@ function collectStream(
   }).catch(() => finish(null));
 }
 
+/** 粗相似判定：一条是另一条的子串（提取模型常改写措辞后重复输出既有记忆） */
+function isDuplicateMemory(candidate: string, existing: string): boolean {
+  const a = candidate.trim();
+  const b = existing.trim();
+  if (a.length < 2 || b.length < 2) return false;
+  return a.includes(b) || b.includes(a);
+}
+
 /**
  * 回合结束后的提取入口。所有守卫不过就静默返回；
  * 提取到新记忆后广播 memories-changed 供面板/设置页刷新。
@@ -129,14 +139,20 @@ export function maybeExtractMemories(
         const items = parseMemories(text);
         if (items.length === 0) return;
         void (async () => {
+          let added = false;
           for (const content of items) {
+            // 模型侧去重不可靠，入库前再做一次本地子串判定
+            if (known.some((m) => isDuplicateMemory(content, m.content))) continue;
             try {
               await dbAddMemory(content, "auto", sessionId);
+              added = true;
             } catch {
-              return; // 入库失败就放弃剩余，静默
+              break; // 入库失败就放弃剩余，静默
             }
           }
-          window.dispatchEvent(new CustomEvent("conchterm.memories-changed"));
+          if (added) {
+            window.dispatchEvent(new CustomEvent("conchterm.memories-changed"));
+          }
         })();
       }
     );
