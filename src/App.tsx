@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, Suspense, lazy } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  Suspense,
+  lazy,
+} from "react";
 import {
   Activity,
   Bot,
@@ -352,6 +360,48 @@ function AppShell() {
     );
   };
 
+  // 标签页操作快捷键：Ctrl+Tab / Ctrl+Shift+Tab 循环切换，Ctrl+1..9 跳转，Ctrl+Shift+W 关闭
+  const activeKeyRef = useRef<string | null>(activeKey);
+  activeKeyRef.current = activeKey;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey && !e.altKey && !e.metaKey;
+      if (e.key === "Tab" && e.ctrlKey) {
+        e.preventDefault();
+        setTabs((prev) => {
+          if (prev.length < 2) return prev;
+          const idx = prev.findIndex((t) => t.key === activeKeyRef.current);
+          const next = e.shiftKey
+            ? (idx - 1 + prev.length) % prev.length
+            : (idx + 1) % prev.length;
+          setActiveKey(prev[next].key);
+          return prev;
+        });
+        return;
+      }
+      if (mod && e.key >= "1" && e.key <= "9") {
+        e.preventDefault();
+        const n = Number(e.key);
+        setTabs((prev) => {
+          if (prev.length === 0) return prev;
+          // 超出标签数的数字键跳到最后一个
+          const idx = Math.min(n, prev.length) - 1;
+          setActiveKey(prev[idx].key);
+          return prev;
+        });
+        return;
+      }
+      // Ctrl+Shift+W 关闭标签；不占用 Ctrl+W（shell 里删一个词）
+      if (mod && e.shiftKey && (e.key === "w" || e.key === "W")) {
+        e.preventDefault();
+        if (activeKeyRef.current) closeTerminal(activeKeyRef.current);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const terminalViews = useMemo(
     () =>
       tabs.map((t) => (
@@ -635,6 +685,14 @@ function AppShell() {
                 </span>
                 <p>欢迎使用 ConchTerm</p>
                 <span>从左侧选择一台服务器即可打开终端</span>
+                <div className="shortcut-hints">
+                  <div><kbd>Ctrl+Shift+C</kbd> 复制</div>
+                  <div><kbd>Ctrl+Shift+V</kbd> 粘贴</div>
+                  <div><kbd>Ctrl+Shift+K</kbd> 清屏</div>
+                  <div><kbd>Ctrl+Tab</kbd> 切换标签</div>
+                  <div><kbd>Ctrl+1..9</kbd> 跳转标签</div>
+                  <div><kbd>Ctrl+Shift+W</kbd> 关闭标签</div>
+                </div>
               </div>
             )}
           </div>

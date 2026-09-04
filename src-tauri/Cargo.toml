@@ -35,6 +35,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # LLM 直连客户端（原 Python sidecar 的 Rust 替代）：rustls 复用 russh 已带的 ring
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream", "json", "gzip"] }
 futures-util = "0.3"
+tauri-plugin-clipboard-manager = "2.3.3"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse"] }
 windows-core = "0.61"

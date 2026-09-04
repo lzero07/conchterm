@@ -1,13 +1,20 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import {
+  Copy,
+  Clipboard,
+  SquareAsterisk,
+  Eraser,
+} from "lucide-react";
 import {
   sshConnect,
   sshResize,
   sshWrite,
   type ConnectParams,
 } from "../api";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   TERMINAL_FONT_SIZE_MAX,
   TERMINAL_FONT_SIZE_MIN,
@@ -20,6 +27,12 @@ interface Props {
   /** 允许 Ctrl+滚轮临时缩放本终端字体（设置里可关） */
   ctrlWheelZoom: boolean;
   onStatus?: (status: "connected" | "failed") => void;
+}
+
+/** 终端右键菜单状态 */
+interface TermContextMenu {
+  x: number;
+  y: number;
 }
 
 export interface TerminalAppearance {
@@ -105,6 +118,20 @@ export default function TerminalView({
   // 设置开关的实时值，滚轮监听器只注册一次、按此判断是否生效
   const ctrlWheelZoomRef = useRef(ctrlWheelZoom);
   ctrlWheelZoomRef.current = ctrlWheelZoom;
+  // 右键菜单（坐标 + 快照的选区/剪贴板状态，决定菜单项可用性）
+  const [ctxMenu, setCtxMenu] = useState<TermContextMenu | null>(null);
+  const [ctxHasSelection, setCtxHasSelection] = useState(false);
+
+  const pasteText = (text: string) => {
+    if (!text) return;
+    sshWrite(sessionKey, new TextEncoder().encode(text));
+  };
+
+  const copySelection = () => {
+    const term = termRef.current;
+    const sel = term?.getSelection();
+    if (sel) void writeText(sel).catch(() => {});
+  };
 
   // 设置面板里改字体/主题/字号时，原地更新已存在的终端实例
   useEffect(() => {
@@ -241,13 +268,81 @@ export default function TerminalView({
     const container = containerRef.current;
     container.addEventListener("wheel", wheelHandler, { passive: false });
 
+    // 自定义右键菜单，替代 WebView2 默认菜单
+    const contextMenuHandler = (e: MouseEvent) => {
+      e.preventDefault();
+      setCtxHasSelection(term.hasSelection());
+      setCtxMenu({ x: e.clientX, y: e.clientY });
+    };
+    container.addEventListener("contextmenu", contextMenuHandler);
+
     const inputHandler = term.onData((d) => {
       sshWrite(sessionKey, new TextEncoder().encode(d));
+    });
+
+    // 终端操作快捷键：在按键送达远端之前拦截处理
+    // 返回 false 表示已消费该按键，不再写入 PTY
+    term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      // 按键抬起/非按下事件放行，避免干扰组合键的释放序列
+      if (e.type !== "keydown") return true;
+      const mod = e.ctrlKey && !e.altKey && !e.metaKey;
+
+      // Ctrl+Shift+C / Ctrl+Insert：复制选区
+      if ((e.ctrlKey && e.shiftKey && (e.key === "C" || e.key === "c")) || (e.ctrlKey && e.key === "Insert")) {
+        const sel = term.getSelection();
+        if (sel) {
+          void writeText(sel).catch(() => {});
+          return false;
+        }
+        // 无选区时不吞按键
+        return true;
+      }
+      // Ctrl+Shift+V / Shift+Insert：粘贴
+      if (
+        (e.ctrlKey && e.shiftKey && (e.key === "V" || e.key === "v")) ||
+        (e.shiftKey && !e.ctrlKey && e.key === "Insert")
+      ) {
+        void readText()
+          .then((text) => pasteText(text))
+          .catch(() => {});
+        return false;
+      }
+      // Ctrl+Shift+A：全选终端缓冲区；Ctrl+A 留给远端 shell（行首跳转）
+      if (mod && e.shiftKey && (e.key === "A" || e.key === "a")) {
+        term.selectAll();
+        return false;
+      }
+      // Ctrl+L 不拦截：透传给远端 shell，由 readline 原生清屏，不干扰全屏程序
+      // Ctrl+Shift+K：本地清屏并清空滚动缓冲（等同 clear 命令的 E3 行为）
+      if (e.ctrlKey && e.shiftKey && (e.key === "K" || e.key === "k")) {
+        term.write("\x1b[H\x1b[2J\x1b[3J");
+        return false;
+      }
+      // Shift+PageUp / Shift+PageDown：滚动缓冲翻页
+      if (e.shiftKey && e.key === "PageUp") {
+        term.scrollPages(-1);
+        return false;
+      }
+      if (e.shiftKey && e.key === "PageDown") {
+        term.scrollPages(1);
+        return false;
+      }
+      // Ctrl+Home / Ctrl+End：滚到最顶 / 最底
+      if (mod && e.key === "Home") {
+        term.scrollToTop();
+        return false;
+      }
+      if (mod && e.key === "End") {
+        term.scrollToBottom();
+        return false;
+      }
+      return true;
     });
 
     return () => {
       disposed = true;
       container.removeEventListener("wheel", wheelHandler);
+      container.removeEventListener("contextmenu", contextMenuHandler);
       inputHandler.dispose();
       resizeObserver.disconnect();
       import("../api").then(({ sshDisconnect }) =>
@@ -267,5 +362,82 @@ export default function TerminalView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey]);
 
-  return <div ref={containerRef} className="terminal-container" />;
+  const closeCtxMenu = () => {
+    setCtxMenu(null);
+    // 菜单操作后把焦点还给终端，键盘输入不中断
+    termRef.current?.focus();
+  };
+
+  return (
+    <>
+      <div ref={containerRef} className="terminal-container" />
+      {ctxMenu && (
+        <>
+          <div
+            className="ctx-backdrop"
+            onClick={closeCtxMenu}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              closeCtxMenu();
+            }}
+          />
+          <div
+            className="ctx-menu"
+            style={{
+              left: Math.min(ctxMenu.x, window.innerWidth - 190),
+              top: Math.min(ctxMenu.y, window.innerHeight - 190),
+            }}
+          >
+            <button
+              className="ctx-item"
+              disabled={!ctxHasSelection}
+              onClick={() => {
+                copySelection();
+                closeCtxMenu();
+              }}
+            >
+              <Copy size={14} strokeWidth={1.8} />
+              复制
+              <span className="ctx-key">Ctrl+Shift+C</span>
+            </button>
+            <button
+              className="ctx-item"
+              onClick={() => {
+                void readText()
+                  .then((text) => pasteText(text ?? ""))
+                  .catch(() => {});
+                closeCtxMenu();
+              }}
+            >
+              <Clipboard size={14} strokeWidth={1.8} />
+              粘贴
+              <span className="ctx-key">Ctrl+Shift+V</span>
+            </button>
+            <button
+              className="ctx-item"
+              onClick={() => {
+                termRef.current?.selectAll();
+                closeCtxMenu();
+              }}
+            >
+              <SquareAsterisk size={14} strokeWidth={1.8} />
+              全选
+              <span className="ctx-key">Ctrl+Shift+A</span>
+            </button>
+            <button
+              className="ctx-item"
+              onClick={() => {
+                termRef.current?.clear();
+                closeCtxMenu();
+              }}
+            >
+              <Eraser size={14} strokeWidth={1.8} />
+              清屏
+              <span className="ctx-key">Ctrl+Shift+K</span>
+            </button>
+          </div>
+        </>
+      )}
+    </>
+  );
 }
