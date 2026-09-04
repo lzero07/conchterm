@@ -949,94 +949,93 @@ pub struct SysstatSample {
     user: String,
 }
 
-fn parse_proc_block<'a>(
-    lines: &mut impl Iterator<Item = &'a str>,
-    end: &str,
-) -> (&'a str, SysstatRaw) {
-    let mut raw = SysstatRaw::default();
-    let mut last = "";
-    for line in lines.by_ref() {
-        if line == end {
-            break;
-        }
-        last = line;
-        if let Some(rest) = line.strip_prefix("cpu ") {
-            let mut it = rest.split_whitespace();
-            let mut total = 0u64;
-            let mut idle = 0u64;
-            for (i, f) in it.by_ref().enumerate() {
-                if let Ok(v) = f.parse::<u64>() {
-                    total += v;
-                    if i == 3 {
-                        idle = v; // user nice system idle -> 第 4 列 idle
-                    }
-                    if i == 4 {
-                        idle += v; // iowait 也算空闲
-                    }
-                }
-            }
-            raw.cpu_total = Some(total);
-            raw.cpu_idle = Some(idle);
-        } else if let Some(rest) = line.strip_prefix("MemTotal:") {
-            raw.mem_total_kb = rest.trim().split_whitespace().next().and_then(|v| v.parse().ok());
-        } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            raw.mem_available_kb = rest.trim().split_whitespace().next().and_then(|v| v.parse().ok());
-        } else if line.contains('|') {
-            // /proc/net/dev 数据行： "  eth0: 12345 packets  ...  67890 packets ..."
-            let mut parts = line.split(':');
-            let _iface = parts.next();
-            if let Some(nums) = parts.next() {
-                let vals: Vec<u64> = nums
-                    .split_whitespace()
-                    .filter_map(|v| v.parse().ok())
-                    .collect();
-                if vals.len() >= 9 {
-                    let add = |acc: &mut Option<u64>, v: u64| {
-                        *acc = Some(acc.unwrap_or(0) + v);
-                    };
-                    add(&mut raw.rx_bytes, vals[0]);
-                    add(&mut raw.tx_bytes, vals[8]);
-                }
-            }
-        } else if raw.uptime_secs.is_none() {
-            // uptime 块第一行："13245.78 51234.02"
-            if let Some(first) = line.split_whitespace().next() {
-                if let Ok(v) = first.parse::<f64>() {
-                    raw.uptime_secs = Some(v);
-                }
-            }
-        }
-    }
-    (last, raw)
-}
-
-/// 解析一个完整的 ===BEGIN===...===END=== 块
+/// 解析一个采样块（含首个块前的 who 导语）。
+/// 结构：[who 行] ===BEGIN=== uptime --STAT-- /proc/stat --MEM-- /proc/meminfo --NET-- /proc/net/dev ===END===
 fn parse_sysstat_block(block: &str) -> SysstatRaw {
     let mut raw = SysstatRaw::default();
-    let mut lines = block.lines().peekable();
-    while let Some(line) = lines.peek() {
-        let line = *line;
-        if line == "--STAT--" {
-            lines.next();
-            parse_proc_block(&mut lines, "--MEM--");
-        } else if line == "--MEM--" {
-            lines.next();
-            parse_proc_block(&mut lines, "--NET--");
-        } else if line == "--NET--" {
-            lines.next();
-            parse_proc_block(&mut lines, "===END===");
-        } else if line == "===BEGIN===" || line.is_empty() {
-            lines.next();
-        } else {
-            // uptime 行（块首）或 who 输出
-            lines.next();
-            if raw.uptime_secs.is_none() {
-                if let Some(first) = line.split_whitespace().next() {
-                    if let Ok(v) = first.parse::<f64>() {
-                        raw.uptime_secs = Some(v);
-                    } else if !line.is_empty() && !line.starts_with("===END===") {
-                        // 可能是 who 输出
-                        raw.user = Some(line.split_whitespace().next().unwrap_or("").to_string());
+    let mut section = "";
+    let mut begun = false;
+    for line in block.lines() {
+        match line {
+            "===BEGIN===" => {
+                begun = true;
+                section = "";
+                continue;
+            }
+            "--STAT--" => {
+                section = "stat";
+                continue;
+            }
+            "--MEM--" => {
+                section = "mem";
+                continue;
+            }
+            "--NET--" => {
+                section = "net";
+                continue;
+            }
+            "===END===" | "" => continue,
+            _ => {}
+        }
+        if !begun {
+            continue; // 导语区：who 输出，用户名在流读取端单独提取
+        }
+        match section {
+            "stat" => {
+                if let Some(rest) = line.strip_prefix("cpu ") {
+                    // 列序：user nice system idle iowait ...；idle + iowait 视为空闲
+                    let mut total = 0u64;
+                    let mut idle = 0u64;
+                    for (i, f) in rest.split_whitespace().enumerate() {
+                        if let Ok(v) = f.parse::<u64>() {
+                            total += v;
+                            if i == 3 {
+                                idle = v;
+                            }
+                            if i == 4 {
+                                idle += v;
+                            }
+                        }
+                    }
+                    raw.cpu_total = Some(total);
+                    raw.cpu_idle = Some(idle);
+                }
+            }
+            "mem" => {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    raw.mem_total_kb = rest
+                        .trim()
+                        .split_whitespace()
+                        .next()
+                        .and_then(|v| v.parse().ok());
+                } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
+                    raw.mem_available_kb = rest
+                        .trim()
+                        .split_whitespace()
+                        .next()
+                        .and_then(|v| v.parse().ok());
+                }
+            }
+            "net" => {
+                // 数据行形如 "  eth0: 12345 ... 67890 ..."（16 列数字，rx 首列 / tx 第 9 列）
+                if let Some((_, nums)) = line.split_once(':') {
+                    let vals: Vec<u64> = nums
+                        .split_whitespace()
+                        .filter_map(|v| v.parse().ok())
+                        .collect();
+                    if vals.len() >= 9 {
+                        raw.rx_bytes = Some(raw.rx_bytes.unwrap_or(0) + vals[0]);
+                        raw.tx_bytes = Some(raw.tx_bytes.unwrap_or(0) + vals[8]);
+                    }
+                }
+            }
+            _ => {
+                // 块首 uptime 行："13245.78 51234.02"
+                if raw.uptime_secs.is_none() {
+                    if let Some(first) = line.split_whitespace().next() {
+                        if let Ok(v) = first.parse::<f64>() {
+                            raw.uptime_secs = Some(v);
+                        }
                     }
                 }
             }
@@ -1276,4 +1275,52 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|w| w == needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_full_block() {
+        let block = "root@pts/0\n===BEGIN===\n13245.78 51234.02\n--STAT--\ncpu  120 0 300 9000 100 0 0 0 0 0\ncpu0 120 0 300 9000 100 0 0 0 0 0\nintr 123\n--MEM--\nMemTotal:       16384000 kB\nMemFree:         2048000 kB\nMemAvailable:   8388608 kB\n--NET--\nInter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n  eth0: 111111 200 0 0 0 0 0 0 222222 100 0 0 0 0 0 0\n  lo: 1000 10 0 0 0 0 0 0 1000 10 0 0 0 0 0 0\n===END===\n";
+        let raw = parse_sysstat_block(block);
+        assert_eq!(raw.uptime_secs, Some(13245.78));
+        // cpu 行：total = 120+0+300+9000+100 = 9520, idle = 9000+100 = 9100
+        assert_eq!(raw.cpu_total, Some(9520));
+        assert_eq!(raw.cpu_idle, Some(9100));
+        assert_eq!(raw.mem_total_kb, Some(16384000));
+        assert_eq!(raw.mem_available_kb, Some(8388608));
+        // eth0 + lo 两个网卡的累计
+        assert_eq!(raw.rx_bytes, Some(112111));
+        assert_eq!(raw.tx_bytes, Some(223222));
+    }
+
+    #[test]
+    fn window_diff_and_counter_rollover() {
+        let mut w = SysstatWindow::new();
+        let mut r0 = SysstatRaw::default();
+        r0.cpu_total = Some(1000);
+        r0.cpu_idle = Some(800);
+        r0.rx_bytes = Some(5000);
+        r0.tx_bytes = Some(3000);
+        assert!(w.push(r0.clone()).is_none()); // 单拍无差分
+
+        let mut r1 = r0.clone();
+        r1.cpu_total = Some(1100); // +100 jiffies
+        r1.cpu_idle = Some(870); // +70 -> busy 30/100 = 30%
+        r1.rx_bytes = Some(9000); // +4000 bytes
+        r1.tx_bytes = Some(3600);
+        let s = w.push(r1.clone()).unwrap();
+        assert!((s.cpu_percent - 30.0).abs() < 0.01);
+        assert!(s.rx_bps > 0.0 && s.tx_bps > 0.0);
+
+        // 计数器回卷（服务器重启）：rx 变小，速率应为 0 而非负/巨大
+        let mut r2 = r1.clone();
+        r2.rx_bytes = Some(10);
+        r2.cpu_total = Some(1200);
+        r2.cpu_idle = Some(1000);
+        let s2 = w.push(r2).unwrap();
+        assert_eq!(s2.rx_bps, 0.0);
+    }
 }

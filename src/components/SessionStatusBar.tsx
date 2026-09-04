@@ -75,7 +75,7 @@ function CpuGauge({ percent }: { percent: number }) {
         fill="var(--text-0)"
         fontWeight="600"
       >
-        {Math.round(pct)}
+        {pct > 0 && pct < 1 ? "<1" : Math.round(pct)}
       </text>
     </svg>
   );
