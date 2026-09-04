@@ -264,7 +264,12 @@ fn history_to_messages(messages: &[AgentChatMessage], protocol: &str) -> Vec<Val
 
 // ---------- 聊天 / Agent 循环 ----------
 
-async fn run_task(ctx: Arc<TaskCtx>, messages: Vec<AgentChatMessage>, mode: String, max_rounds: u32) {
+async fn run_task(
+    ctx: Arc<TaskCtx>,
+    messages: Vec<AgentChatMessage>,
+    mode: String,
+    max_rounds: u32,
+) {
     let result = if mode == "agent" {
         run_agent(ctx.clone(), messages, max_rounds).await
     } else {
@@ -280,17 +285,12 @@ async fn run_chat(ctx: Arc<TaskCtx>, messages: Vec<AgentChatMessage>) -> Result<
     let msgs = history_to_messages(&messages, &ctx.cfg.protocol);
     let resp = ctx
         .client
-        .chat(
-            &ctx.cfg,
-            &msgs,
-            None,
-            |part| {
-                ctx.send(AgentEvent::Delta {
-                    id: ctx.request_id.clone(),
-                    content: part.to_string(),
-                })
-            },
-        )
+        .chat(&ctx.cfg, &msgs, None, |part| {
+            ctx.send(AgentEvent::Delta {
+                id: ctx.request_id.clone(),
+                content: part.to_string(),
+            })
+        })
         .await?;
     ctx.finish(resp.usage.map(TokenUsage::from)).await;
     Ok(())
@@ -313,17 +313,12 @@ async fn run_agent(
         }
         let resp = ctx
             .client
-            .chat(
-                &ctx.cfg,
-                &msgs,
-                Some(&tools),
-                |part| {
-                    ctx.send(AgentEvent::Delta {
-                        id: ctx.request_id.clone(),
-                        content: part.to_string(),
-                    })
-                },
-            )
+            .chat(&ctx.cfg, &msgs, Some(&tools), |part| {
+                ctx.send(AgentEvent::Delta {
+                    id: ctx.request_id.clone(),
+                    content: part.to_string(),
+                })
+            })
             .await?;
         usage_total = merge_usage(usage_total, resp.usage.clone());
 
@@ -345,7 +340,11 @@ async fn run_agent(
             let result = match wait_tool_result(&ctx, &call.id).await {
                 Ok(r) => r,
                 Err(_) => {
-                    ctx.fail(format!("工具确认超时（{} 秒无响应）", TOOL_WAIT_TIMEOUT.as_secs())).await;
+                    ctx.fail(format!(
+                        "工具确认超时（{} 秒无响应）",
+                        TOOL_WAIT_TIMEOUT.as_secs()
+                    ))
+                    .await;
                     return Ok(());
                 }
             };
@@ -356,20 +355,25 @@ async fn run_agent(
             let content = if result.approved {
                 truncate_chars(&result.output, TOOL_OUTPUT_LIMIT)
             } else {
-                "用户拒绝执行该命令。请勿再次尝试相同或相似的命令，改为向用户解释或询问下一步意愿。".to_string()
+                "用户拒绝执行该命令。请勿再次尝试相同或相似的命令，改为向用户解释或询问下一步意愿。"
+                    .to_string()
             };
             msgs.push(tool_result_message(&ctx.cfg.protocol, &call.id, &content));
         }
     }
 
-    ctx.fail(format!("已达到最大工具调用轮数（{max_rounds}）")).await;
+    ctx.fail(format!("已达到最大工具调用轮数（{max_rounds}）"))
+        .await;
     Ok(())
 }
 
 /// 挂起等待前端回传该次工具调用的结果；超时或请求被清理则 Err
 async fn wait_tool_result(ctx: &TaskCtx, call_id: &str) -> Result<ToolResult, ()> {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    ctx.tool_waiters.lock().await.insert(call_id.to_string(), tx);
+    ctx.tool_waiters
+        .lock()
+        .await
+        .insert(call_id.to_string(), tx);
     match tokio::time::timeout(TOOL_WAIT_TIMEOUT, rx).await {
         Ok(Ok(result)) => Ok(result),
         _ => {

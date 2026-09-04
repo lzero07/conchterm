@@ -1003,17 +1003,10 @@ fn parse_sysstat_block(block: &str) -> SysstatRaw {
             }
             "mem" => {
                 if let Some(rest) = line.strip_prefix("MemTotal:") {
-                    raw.mem_total_kb = rest
-                        .trim()
-                        .split_whitespace()
-                        .next()
-                        .and_then(|v| v.parse().ok());
+                    raw.mem_total_kb = rest.split_whitespace().next().and_then(|v| v.parse().ok());
                 } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-                    raw.mem_available_kb = rest
-                        .trim()
-                        .split_whitespace()
-                        .next()
-                        .and_then(|v| v.parse().ok());
+                    raw.mem_available_kb =
+                        rest.split_whitespace().next().and_then(|v| v.parse().ok());
                 }
             }
             "net" => {
@@ -1072,7 +1065,12 @@ impl SysstatWindow {
         if dt <= 0.0 {
             return None;
         }
-        let cpu_percent = match (first.cpu_total, first.cpu_idle, last.cpu_total, last.cpu_idle) {
+        let cpu_percent = match (
+            first.cpu_total,
+            first.cpu_idle,
+            last.cpu_total,
+            last.cpu_idle,
+        ) {
             (Some(t0v), Some(i0v), Some(t1v), Some(i1v)) => {
                 let d_total = t1v.saturating_sub(t0v) as f64;
                 let d_idle = i1v.saturating_sub(i0v) as f64;
@@ -1260,21 +1258,15 @@ async fn run_sysstat_stream(
 async fn get_sysstat_gen(session_id: &str, app: &tauri::AppHandle) -> u32 {
     use tauri::Manager;
     let sessions = app.state::<SessionMap>();
-    let gen = sessions
-        .0
-        .lock()
-        .await
-        .get(session_id)
-        .map(|s| s.sysstat_gen.load(Ordering::Relaxed))
-        .unwrap_or(0);
-    drop(sessions);
-    gen
+    let gen = { sessions.0.lock().await.get(session_id).cloned() };
+    match gen {
+        Some(s) => s.sysstat_gen.load(Ordering::Relaxed),
+        None => 0,
+    }
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 #[cfg(test)]

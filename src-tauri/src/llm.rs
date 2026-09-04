@@ -244,10 +244,7 @@ impl LlmClient {
             .filter(|m| m["role"] == "system")
             .filter_map(|m| m["content"].as_str())
             .collect();
-        let turns: Vec<&Value> = messages
-            .iter()
-            .filter(|m| m["role"] != "system")
-            .collect();
+        let turns: Vec<&Value> = messages.iter().filter(|m| m["role"] != "system").collect();
 
         let mut body = json!({
             "model": cfg.model,
@@ -476,9 +473,7 @@ fn parse_usage_openai(usage: &Value) -> Option<LlmUsage> {
     }
     let input = usage["prompt_tokens"].as_i64().unwrap_or(0);
     let output = usage["completion_tokens"].as_i64().unwrap_or(0);
-    let total = usage["total_tokens"]
-        .as_i64()
-        .unwrap_or(input + output);
+    let total = usage["total_tokens"].as_i64().unwrap_or(input + output);
     Some(LlmUsage {
         input_tokens: input,
         output_tokens: output,
@@ -491,7 +486,10 @@ async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response, Stri
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("接口返回错误（{status}）: {}", truncate(&body, 500)));
+        return Err(format!(
+            "接口返回错误（{status}）: {}",
+            truncate(&body, 500)
+        ));
     }
     Ok(resp)
 }
@@ -581,15 +579,25 @@ mod tests {
 
     #[test]
     fn join_url_variants() {
-        assert_eq!(join_url("https://api.openai.com/v1", "/chat/completions"), "https://api.openai.com/v1/chat/completions");
-        assert_eq!(join_url("https://api.openai.com/v1/", "/chat/completions"), "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            join_url("https://api.openai.com/v1", "/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            join_url("https://api.openai.com/v1/", "/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
     }
 
     #[test]
     fn openai_usage_parse() {
-        let v = serde_json::json!({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15});
+        let v =
+            serde_json::json!({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15});
         let u = parse_usage_openai(&v).unwrap();
-        assert_eq!((u.input_tokens, u.output_tokens, u.total_tokens), (10, 5, 15));
+        assert_eq!(
+            (u.input_tokens, u.output_tokens, u.total_tokens),
+            (10, 5, 15)
+        );
         // 缺 total_tokens 时按 input+output 补
         let v = serde_json::json!({"prompt_tokens": 7, "completion_tokens": 3});
         let u = parse_usage_openai(&v).unwrap();
